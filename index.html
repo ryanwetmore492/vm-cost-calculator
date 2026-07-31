@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VM Cost Calculator — VMware Cloud Director MSP Pricing</title>
+<meta name="description" content="Client-side monthly cost calculator for VMware Cloud Director virtual machines: compute ratio tiers, VMware licensing, storage tiers, Windows SPLA and add-ons.">
+<link rel="preconnect" href="https://api.fontshare.com">
+<link href="https://api.fontshare.com/v2/css?f[]=satoshi@400,500,700&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%230b1015'/%3E%3Cg stroke='%2338d0c8' stroke-width='2.4' fill='none'%3E%3Crect x='7' y='7' width='18' height='7'/%3E%3Crect x='7' y='18' width='18' height='7'/%3E%3C/g%3E%3C/svg%3E">
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+
+<header class="topbar">
+  <div class="brand">
+    <svg class="logo" viewBox="0 0 40 40" fill="none" aria-label="VM Cost Calculator logo" role="img">
+      <rect x="4" y="5" width="32" height="11" rx="2" stroke="currentColor" stroke-width="2.2"/>
+      <rect x="4" y="24" width="32" height="11" rx="2" stroke="currentColor" stroke-width="2.2"/>
+      <circle cx="10" cy="10.5" r="1.8" fill="currentColor"/>
+      <circle cx="10" cy="29.5" r="1.8" fill="currentColor"/>
+      <path d="M24 10.5h7M24 29.5h7" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/>
+      <path d="M20 16v8" stroke="currentColor" stroke-width="2.2" stroke-dasharray="2 3"/>
+    </svg>
+    <div class="brand-text">
+      <span class="brand-title">VM Cost Calculator</span>
+      <span class="brand-sub">VMware Cloud Director · MSP billing model</span>
+    </div>
+  </div>
+
+  <div class="topbar-actions">
+    <label class="client-switch">
+      <span class="lbl">Client</span>
+      <select id="clientSelect" aria-label="Active client profile"></select>
+    </label>
+    <button class="btn" id="btnSaveClient" title="Save current pricing + inventory to this client profile">Save</button>
+    <button class="btn" id="btnNewClient">New client</button>
+    <div class="menu-wrap">
+      <button class="btn" id="btnProfileMenu" aria-haspopup="true" aria-expanded="false">Profiles ▾</button>
+      <div class="menu" id="profileMenu" hidden>
+        <button data-act="rename">Rename client…</button>
+        <button data-act="duplicate">Duplicate client</button>
+        <button data-act="export">Export profile (JSON)</button>
+        <button data-act="exportall">Export all profiles (JSON)</button>
+        <button data-act="import">Import profile (JSON)…</button>
+        <button data-act="delete" class="danger">Delete client</button>
+      </div>
+    </div>
+    <button class="btn icon" id="btnTheme" title="Toggle light / dark" aria-label="Toggle light or dark theme">◐</button>
+  </div>
+</header>
+
+<nav class="tabs" role="tablist" aria-label="Sections">
+  <button class="tab active" role="tab" data-tab="pricing">1 · Pricing config</button>
+  <button class="tab" role="tab" data-tab="inventory">2 · VM inventory <span class="pill" id="vmCountPill">0</span></button>
+  <button class="tab" role="tab" data-tab="results">3 · Results</button>
+</nav>
+
+<main id="main">
+
+<!-- ============ PRICING ============ -->
+<section class="panel" id="tab-pricing">
+  <div class="panel-head">
+    <div>
+      <h1>Pricing configuration</h1>
+      <p class="muted">Every price is editable. Defaults reflect the standard Expedient SKU catalog — override them per client contract.</p>
+    </div>
+    <div class="head-btns">
+      <button class="btn" id="btnResetPricing">Reset to defaults</button>
+    </div>
+  </div>
+
+  <div class="grid-2">
+    <div class="card">
+      <div class="card-head">
+        <h2>Compute — processor ratio tiers</h2>
+        <span class="unit-tag">per GB RAM / month</span>
+      </div>
+      <p class="muted small">RAM-to-vCPU ratio tiers. Each VM is assigned exactly one tier. Add tiers such as 1:1 or 8:1 as needed.</p>
+      <div class="table-scroll">
+        <table class="cfg-table" id="ratioTable">
+          <thead><tr><th>SKU</th><th>Tier label</th><th>Name</th><th class="num">Price / GB RAM</th><th class="w-act">Default</th><th class="w-act"></th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <button class="btn ghost" id="btnAddRatio">+ Add ratio tier</button>
+    </div>
+
+    <div class="card">
+      <div class="card-head">
+        <h2>Storage tiers</h2>
+        <span class="unit-tag">per TB allocated / month</span>
+      </div>
+      <p class="muted small">Priced on provisioned (allocated) disk. One tier per VM.</p>
+      <div class="table-scroll">
+        <table class="cfg-table" id="storageTable">
+          <thead><tr><th>SKU</th><th>Tier name</th><th class="num">Price / TB</th><th class="w-act">Default</th><th class="w-act"></th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <button class="btn ghost" id="btnAddStorage">+ Add storage tier</button>
+    </div>
+
+    <div class="card">
+      <div class="card-head"><h2>Licensing</h2></div>
+      <div class="table-scroll">
+      <table class="cfg-table" id="licTable">
+        <thead><tr><th>SKU</th><th>Name</th><th>Unit</th><th class="num">Price</th><th class="w-act">Applies</th></tr></thead>
+        <tbody>
+          <tr>
+            <td><input class="in mono sku" id="licVmSku" aria-label="VMware licensing SKU"></td>
+            <td><input class="in" id="licVmName" aria-label="VMware licensing name"></td>
+            <td class="mono muted">per GB RAM</td>
+            <td class="num"><div class="money"><span>$</span><input class="in num mono" id="licVmPrice" type="number" step="0.01" min="0" aria-label="VMware licensing price per GB RAM"></div></td>
+            <td class="w-act">
+              <label class="switch" title="Apply VMware licensing to all VMs">
+                <input type="checkbox" id="licVmEnabled"><span class="track"></span>
+              </label>
+            </td>
+          </tr>
+          <tr>
+            <td><input class="in mono sku" id="splaSku" aria-label="Windows SPLA SKU"></td>
+            <td><input class="in" id="splaName" aria-label="Windows SPLA name"></td>
+            <td class="mono muted">per VM (flat)</td>
+            <td class="num"><div class="money"><span>$</span><input class="in num mono" id="splaPrice" type="number" step="0.01" min="0" aria-label="Windows SPLA price per VM"></div></td>
+            <td class="w-act"><span class="badge">OS contains “windows”</span></td>
+          </tr>
+        </tbody>
+      </table>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-head">
+        <h2>Custom add-on SKUs</h2>
+      </div>
+      <p class="muted small">Optional charges toggled per VM in the inventory table (backup, DRaaS, monitoring, IP blocks…).</p>
+      <div class="table-scroll">
+        <table class="cfg-table" id="addonTable">
+          <thead><tr><th>SKU</th><th>Name</th><th>Unit</th><th class="num">Price</th><th class="w-act">Default on</th><th class="w-act"></th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <div class="empty tiny" id="addonEmpty" hidden>No add-ons defined. Add one to offer optional per-VM charges.</div>
+      <button class="btn ghost" id="btnAddAddon">+ Add add-on SKU</button>
+    </div>
+
+    <div class="card span-2">
+      <div class="card-head"><h2>Calculation settings</h2></div>
+      <div class="settings-row">
+        <label class="field">
+          <span>GB → TB divisor</span>
+          <select id="setDivisor">
+            <option value="1024">1024 (binary — TiB, default)</option>
+            <option value="1000">1000 (decimal — TB)</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>Round per-VM costs to cents</span>
+          <select id="setRounding">
+            <option value="line">Round each line item</option>
+            <option value="total">Round totals only</option>
+          </select>
+        </label>
+        <div class="assumption">
+          <strong>Assumptions:</strong> storage billed on <em>provisioned</em> disk, converted GB → TB by dividing by
+          <span class="mono" id="divisorEcho">1024</span>. Compute and VMware licensing are billed per GB of configured RAM.
+          Windows SPLA is a flat per-VM charge applied when the OS string contains “windows” (case-insensitive). All figures are monthly USD.
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ INVENTORY ============ -->
+<section class="panel" id="tab-inventory" hidden>
+  <div class="panel-head">
+    <div>
+      <h1>VM inventory</h1>
+      <p class="muted">Add VMs manually or import a CSV export from Cloud Director / RVTools.</p>
+    </div>
+    <div class="head-btns">
+      <button class="btn primary" id="btnAddVm">+ Add VM</button>
+      <button class="btn" id="btnImportCsv">Import CSV…</button>
+      <button class="btn" id="btnSampleCsv">Sample CSV</button>
+      <button class="btn danger-ghost" id="btnClearVms">Clear all</button>
+      <input type="file" id="csvFile" accept=".csv,text/csv" hidden>
+      <input type="file" id="jsonFile" accept=".json,application/json" hidden>
+    </div>
+  </div>
+
+  <div class="bulk-bar" id="bulkBar" hidden>
+    <span class="muted small">Bulk apply to all VMs:</span>
+    <select id="bulkRatio" aria-label="Bulk apply ratio tier"><option value="">Ratio tier…</option></select>
+    <select id="bulkStorage" aria-label="Bulk apply storage tier"><option value="">Storage tier…</option></select>
+  </div>
+
+  <div class="card flush">
+    <div class="table-scroll">
+      <table class="vm-table" id="vmTable">
+        <thead><tr>
+          <th class="w-idx">#</th><th>Name</th><th>OS</th><th class="num">RAM (GB)</th><th class="num">Disk (GB)</th>
+          <th>Ratio tier</th><th>Storage tier</th><th id="addonHead">Add-ons</th><th class="w-act"></th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <div class="empty" id="vmEmpty">
+      <svg viewBox="0 0 48 48" fill="none" aria-hidden="true"><rect x="6" y="9" width="36" height="12" rx="2" stroke="currentColor" stroke-width="2"/><rect x="6" y="27" width="36" height="12" rx="2" stroke="currentColor" stroke-width="2"/><circle cx="13" cy="15" r="1.6" fill="currentColor"/><circle cx="13" cy="33" r="1.6" fill="currentColor"/></svg>
+      <h3>No VMs in this inventory</h3>
+      <p>Add a VM manually, or import a CSV and map its columns. Not sure of the format? Download the sample CSV.</p>
+      <div class="empty-btns">
+        <button class="btn primary" data-proxy="btnAddVm">+ Add VM</button>
+        <button class="btn" data-proxy="btnImportCsv">Import CSV…</button>
+        <button class="btn ghost" data-proxy="btnSampleCsv">Download sample CSV</button>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ RESULTS ============ -->
+<section class="panel" id="tab-results" hidden>
+  <div class="panel-head">
+    <div>
+      <h1>Cost breakdown</h1>
+      <p class="muted" id="resultsSub">Monthly recurring cost per VM.</p>
+    </div>
+    <div class="head-btns">
+      <button class="btn" id="btnExportCsv">Export results CSV</button>
+      <button class="btn" id="btnPrint">Print / PDF</button>
+    </div>
+  </div>
+
+  <div class="cards" id="summaryCards"></div>
+
+  <div class="card flush">
+    <div class="table-scroll">
+      <table class="res-table" id="resTable">
+        <thead><tr>
+          <th data-sort="name">Name</th><th data-sort="os">OS</th><th data-sort="ram" class="num">RAM GB</th>
+          <th data-sort="disk" class="num">Disk GB</th><th data-sort="ratio">Ratio</th><th data-sort="storage">Storage tier</th>
+          <th data-sort="compute" class="num">Compute $</th><th data-sort="vmware" class="num">VMware lic $</th>
+          <th data-sort="storageCost" class="num">Storage $</th><th data-sort="spla" class="num">Win SPLA $</th>
+          <th data-sort="addons" class="num">Add-ons $</th><th data-sort="total" class="num strong">Total / mo</th>
+        </tr></thead>
+        <tbody></tbody>
+        <tfoot></tfoot>
+      </table>
+    </div>
+    <div class="empty" id="resEmpty">
+      <svg viewBox="0 0 48 48" fill="none" aria-hidden="true"><path d="M8 38V20M18 38V10M28 38V26M38 38V16" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></svg>
+      <h3>Nothing to price yet</h3>
+      <p>Results appear as soon as this client has at least one VM in inventory.</p>
+      <div class="empty-btns"><button class="btn primary" id="btnGoInventory">Go to VM inventory</button></div>
+    </div>
+  </div>
+
+  <div class="card" id="tierRollup" hidden>
+    <div class="card-head"><h2>Roll-up by SKU</h2></div>
+    <div class="table-scroll">
+      <table class="cfg-table" id="skuRollup">
+        <thead><tr><th>SKU</th><th>Charge</th><th class="num">Quantity</th><th class="num">Rate</th><th class="num">Monthly $</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </div>
+</section>
+</main>
+
+<footer class="foot">
+  <span>All data stays in this browser — <span class="mono" id="storageInfo">localStorage</span>. Export a profile as JSON to back it up or share it.</span>
+  <span class="mono" id="savedStamp"></span>
+</footer>
+
+<!-- CSV mapping modal -->
+<div class="modal-backdrop" id="mapModal" hidden>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="mapTitle">
+    <div class="modal-head">
+      <h2 id="mapTitle">Map CSV columns</h2>
+      <button class="btn icon" data-close aria-label="Close">✕</button>
+    </div>
+    <div class="modal-body">
+      <p class="muted small" id="mapFileInfo"></p>
+      <div class="map-grid" id="mapGrid"></div>
+      <div class="map-opts">
+        <label class="field"><span>Disk units in file</span>
+          <select id="mapDiskUnit"><option value="GB">GB (default)</option><option value="MB">MB</option><option value="TB">TB</option></select>
+        </label>
+        <label class="field"><span>RAM units in file</span>
+          <select id="mapRamUnit"><option value="GB">GB (default)</option><option value="MB">MB</option></select>
+        </label>
+        <label class="field"><span>Fallback ratio tier</span><select id="mapRatio"></select></label>
+        <label class="field"><span>Fallback storage tier</span><select id="mapStorage"></select></label>
+        <label class="field"><span>Existing VMs</span>
+          <select id="mapMode"><option value="replace">Replace inventory</option><option value="append">Append to inventory</option></select>
+        </label>
+      </div>
+      <h3 class="prev-title">Preview <span class="muted small" id="mapPrevInfo"></span></h3>
+      <div class="table-scroll prev-scroll">
+        <table class="cfg-table" id="mapPreview"><thead></thead><tbody></tbody></table>
+      </div>
+      <div class="map-warn" id="mapWarn" hidden></div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn" data-close>Cancel</button>
+      <button class="btn primary" id="btnConfirmImport">Import VMs</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast-wrap" id="toasts" aria-live="polite"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

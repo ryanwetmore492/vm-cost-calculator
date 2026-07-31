@@ -1,0 +1,4 @@
+Name,OS,RAM_GB,Disk_GB,Ratio,StorageTier
+WEB01,Microsoft Windows Server 2022,16,200,4:1,Standard Flash
+SQL01,Microsoft Windows Server 2019,64,1024,2:1,High Performance Flash
+APP01,Ubuntu Linux 22.04,32,500,4:1,Standard Flash
