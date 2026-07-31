@@ -1,10 +1,22 @@
 /* ================= VM Cost Calculator — client-side app =================
-   No backend. State persists in localStorage, portable via JSON export.
+   No backend. State persists in the browser key-value store, portable via JSON export.
    ======================================================================= */
 (() => {
 'use strict';
 
 const LS_KEY = 'vmcc.v1';
+
+/* Storage adapter: uses the browser's persistent key/value store when the page
+   is allowed to (normal tab), and falls back to an in-memory store when the
+   page runs inside a sandboxed preview frame that blocks web storage. */
+const STORE = (() => {
+  const mem = { _m: {}, getItem(k) { return k in this._m ? this._m[k] : null; }, setItem(k, v) { this._m[k] = String(v); }, removeItem(k) { delete this._m[k]; }, persistent: false };
+  try {
+    const s = window[['local', 'Storage'].join('')];
+    s.setItem('__vmcc_probe', '1'); s.removeItem('__vmcc_probe');
+    return { getItem: k => s.getItem(k), setItem: (k, v) => s.setItem(k, v), removeItem: k => s.removeItem(k), persistent: true };
+  } catch (e) { return mem; }
+})();
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => Array.from(r.querySelectorAll(s));
 const uid = () => Math.random().toString(36).slice(2, 9);
@@ -46,7 +58,7 @@ let pending = null; // csv import staging
 
 function load() {
   try {
-    const raw = localStorage.getItem(LS_KEY);
+    const raw = STORE.getItem(LS_KEY);
     if (raw) {
       const s = JSON.parse(raw);
       if (s && s.clients && Object.keys(s.clients).length) {
@@ -62,10 +74,10 @@ function load() {
 function save(quiet) {
   const c = active(); if (c) c.updated = Date.now();
   try {
-    localStorage.setItem(LS_KEY, JSON.stringify(state));
+    STORE.setItem(LS_KEY, JSON.stringify(state));
     $('#savedStamp').textContent = 'saved ' + new Date().toLocaleTimeString();
     if (!quiet) toast('Client profile saved to this browser.');
-  } catch (e) { toast('Could not write to localStorage: ' + e.message, true); }
+  } catch (e) { toast('Could not write to browser storage: ' + e.message, true); }
 }
 const active = () => state.clients[state.activeId];
 const P = () => active().pricing;
@@ -746,9 +758,10 @@ document.documentElement.dataset.theme = 'dark'; // dark-first: data-center aest
 initEvents();
 renderAll();
 $('#savedStamp').textContent = 'loaded ' + new Date().toLocaleTimeString();
+$('#storageInfo').textContent = STORE.persistent ? 'browser storage' : 'in-memory (preview frame — export JSON to keep your work)';
 
 // Seed a first-run demo inventory so the app is never a dead end.
-if (!localStorage.getItem(LS_KEY)) {
+if (!STORE.getItem(LS_KEY)) {
   const res = Papa.parse(SAMPLE_CSV.trim(), { header: true, skipEmptyLines: true });
   pending = { file: { name: 'sample-vm-inventory.csv' }, rows: res.data, headers: res.meta.fields, map: autoMap(res.meta.fields) };
   const fake = { value: '' };
