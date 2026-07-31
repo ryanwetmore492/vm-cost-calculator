@@ -159,6 +159,7 @@ main{padding:var(--space-6) clamp(var(--space-4),3vw,var(--space-10)); max-width
 .panel-head{display:flex;flex-wrap:wrap;gap:var(--space-4);align-items:flex-end;justify-content:space-between;margin-bottom:var(--space-6)}
 .head-btns{display:flex;flex-wrap:wrap;gap:var(--space-2)}
 .grid-2{display:grid;grid-template-columns:repeat(auto-fit,minmax(520px,1fr));gap:var(--space-5)}
+.grid-2.stack{grid-template-columns:1fr}
 .span-2{grid-column:1/-1}
 .card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);padding:var(--space-5);box-shadow:var(--shadow)}
 .card.flush{padding:0;overflow:hidden}
@@ -182,9 +183,11 @@ tbody tr:hover{background:var(--surface-2)}
 .cfg-table td, .vm-table td{white-space:nowrap}
 .cfg-table .in{min-width:0}
 .cfg-table .in.sku{min-width:4.2rem;max-width:5rem}
-.cfg-table td:nth-child(2) .in{min-width:4.5rem}
-.cfg-table td:nth-child(3) .in{min-width:7rem}
-#licTable td:nth-child(2) .in{min-width:8rem}
+.cfg-table td:nth-child(2) .in{min-width:6rem}
+#storageTable td:nth-child(2) .in{min-width:22rem}
+#addonTable td:nth-child(2) .in{min-width:18rem}
+.cfg-table td:nth-child(3) .in{min-width:22rem}
+#licTable td:nth-child(2) .in{min-width:24rem}
 .cfg-table .money .in{min-width:4.2rem;max-width:5.5rem}
 .cfg-table select{min-width:8rem}
 .cfg-table thead th{padding-left:.4rem;padding-right:.4rem}
