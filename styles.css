@@ -190,6 +190,11 @@ tbody tr:hover{background:var(--surface-2)}
 #licTable td:nth-child(2) .in{min-width:24rem}
 .cfg-table .money .in{min-width:4.2rem;max-width:5.5rem}
 .cfg-table select{min-width:8rem}
+#storageTable select.unit-sel{min-width:6.5rem}
+#storageTable th.w-unit{width:6.5rem}
+.money .suffix{white-space:nowrap}
+.rate-echo{font-size:11px;color:var(--text-faint);text-align:right;margin-top:.15rem}
+.assume-line{margin:0 0 var(--space-3)}
 .cfg-table thead th{padding-left:.4rem;padding-right:.4rem}
 .cfg-table tbody td{padding-left:.35rem;padding-right:.35rem}
 .vm-table .in, .vm-table select{min-width:6rem}
@@ -303,6 +308,8 @@ tfoot td.label{font-family:var(--font-sans);text-transform:uppercase;letter-spac
   .brand-sub{display:none}
   main{padding-left:var(--space-3);padding-right:var(--space-3)}
   .grid-2{grid-template-columns:1fr}
+  #storageTable select.unit-sel{min-width:5.5rem}
+  .rate-echo{display:none}
 }
 @media print{
   .topbar,.tabs,.head-btns,.foot,.toast-wrap,#tierRollup,#locFilterBar{display:none!important}

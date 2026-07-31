@@ -33,8 +33,8 @@ function defaultPricing() {
       { id: uid(), sku: 'CUSTOM', label: '2:1', name: 'Enterprise Cloud Compute (2:1 Processor Ratio)', price: 15.00, isDefault: false }
     ],
     storage: [
-      { id: uid(), sku: '3819', name: 'Enterprise Cloud Storage — Standard Flash', price: 333.00, isDefault: true },
-      { id: uid(), sku: '3815', name: 'Enterprise Cloud Storage — High Performance Flash', price: 359.00, isDefault: false }
+      { id: uid(), sku: '3819', name: 'Enterprise Cloud Storage — Standard Flash', price: 333.00, unit: 'TB', isDefault: true },
+      { id: uid(), sku: '3815', name: 'Enterprise Cloud Storage — High Performance Flash', price: 359.00, unit: 'TB', isDefault: false }
     ],
     vmwareLic: { sku: '2729', name: 'VMware Licensing', price: 10.00, enabled: true },
     spla: { sku: '2589', name: 'Microsoft Windows Server Licensing (SPLA)', price: 99.00 },
@@ -49,6 +49,30 @@ function blankVm(pricing) {
   const dr = (pricing.ratios.find(r => r.isDefault) || pricing.ratios[0] || {}).id || '';
   const ds = (pricing.storage.find(s => s.isDefault) || pricing.storage[0] || {}).id || '';
   return { id: uid(), name: '', os: 'Linux', location: '', ram: 0, disk: 0, ratioId: dr, storageId: ds, addons: pricing.addons.filter(a => a.defaultOn).map(a => a.id) };
+}
+
+/* ---------------- storage unit helpers ----------------
+   Each storage tier is priced either per TB (default, disk GB ÷ divisor) or
+   per GB (disk GB × price, no conversion). Tiers saved before this feature
+   existed have no `unit` field and are treated as per TB. */
+const SU = s => (s && String(s.unit).toUpperCase() === 'GB') ? 'GB' : 'TB';
+/* per-GB rates are small numbers: show up to 4 decimals so $0.325/GB is not rounded away */
+const rateNum = s => SU(s) === 'GB'
+  ? (Number(s.price) || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 4 })
+  : num(s.price);
+const rateStr = s => '$' + rateNum(s) + '/' + SU(s);
+function normalizePricing(p) {
+  (p.storage || []).forEach(s => { s.unit = SU(s); });
+  return p;
+}
+/* human summary of how storage is billed, used in assumptions text */
+function storageUnitSummary(p) {
+  const tiers = (p || P()).storage || [];
+  const gb = tiers.filter(s => SU(s) === 'GB'), tb = tiers.filter(s => SU(s) === 'TB');
+  if (!gb.length) return `all storage tiers priced per TB (disk GB ÷ ${(p || P()).settings.divisor})`;
+  if (!tb.length) return 'all storage tiers priced per GB of provisioned disk (no GB → TB conversion)';
+  return `${tb.length} tier${tb.length === 1 ? '' : 's'} priced per TB (÷ ${(p || P()).settings.divisor}), `
+    + `${gb.length} priced per GB: ` + gb.map(s => shortTier(s.name)).join(', ');
 }
 
 /* ---------------- location helpers ----------------
@@ -80,7 +104,7 @@ function load() {
       const s = JSON.parse(raw);
       if (s && s.clients && Object.keys(s.clients).length) {
         Object.values(s.clients).forEach(c => {
-          c.pricing = Object.assign(defaultPricing(), c.pricing);
+          c.pricing = normalizePricing(Object.assign(defaultPricing(), c.pricing));
           c.vms = c.vms || [];
           // backward compat: profiles saved before locations existed
           c.vms.forEach(v => { if (typeof v.location !== 'string') v.location = ''; });
@@ -124,10 +148,12 @@ function costVm(vm) {
   const st = p.storage.find(s => s.id === vm.storageId) || null;
   const tb = tbOf(disk);
   const round = p.settings.rounding === 'line' ? r2 : (x => x);
+  const storageUnit = st ? SU(st) : 'TB';
+  const storageQty = storageUnit === 'GB' ? disk : tb; // per GB skips the divisor entirely
 
   const compute = round(ram * (ratio ? Number(ratio.price) || 0 : 0));
   const vmware = round(p.vmwareLic.enabled ? ram * (Number(p.vmwareLic.price) || 0) : 0);
-  const storage = round(tb * (st ? Number(st.price) || 0 : 0));
+  const storage = round(storageQty * (st ? Number(st.price) || 0 : 0));
   const spla = round(isWin(vm.os) ? (Number(p.spla.price) || 0) : 0);
   let addons = 0; const addonDetail = [];
   (vm.addons || []).forEach(id => {
@@ -140,6 +166,7 @@ function costVm(vm) {
   const total = r2(compute + vmware + storage + spla + addons);
   return {
     vm, ram, disk, tb, ratio, storageTier: st, location: locOf(vm),
+    storageUnit, storageQty,
     ratioLabel: ratio ? (ratio.label || ratio.name) : '— none —',
     storageLabel: st ? st.name : '— none —',
     compute, vmware, storage, spla, addons, addonDetail, total, windows: isWin(vm.os)
@@ -166,7 +193,12 @@ function renderPricing() {
     <tr data-kind="storage" data-id="${s.id}">
       <td><input class="in mono sku" data-f="sku" value="${esc(s.sku)}" aria-label="SKU code"></td>
       <td><input class="in" data-f="name" value="${esc(s.name)}" aria-label="Storage tier name"></td>
-      <td class="num"><div class="money"><span>$</span><input class="in num mono" type="number" step="0.01" min="0" data-f="price" value="${s.price}" aria-label="Price per TB"></div></td>
+      <td><select data-f="unit" class="unit-sel" aria-label="Pricing unit for this storage tier">
+        <option value="TB" ${SU(s) === 'TB' ? 'selected' : ''}>per TB</option>
+        <option value="GB" ${SU(s) === 'GB' ? 'selected' : ''}>per GB</option>
+      </select></td>
+      <td class="num"><div class="money"><span>$</span><input class="in num mono" type="number" step="${SU(s) === 'GB' ? '0.001' : '0.01'}" min="0" data-f="price" value="${s.price}" placeholder="${SU(s) === 'GB' ? '0.325' : '333.00'}" aria-label="Price per ${SU(s)}"><span class="suffix">/ ${SU(s)}</span></div>
+        <div class="rate-echo mono">${esc(rateStr(s))}</div></td>
       <td class="w-act"><input type="radio" name="defStorage" data-f="isDefault" ${s.isDefault ? 'checked' : ''} aria-label="Default storage tier" style="accent-color:var(--primary)"></td>
       <td class="w-act"><button class="btn row-x" data-del="storage" title="Remove tier">✕</button></td>
     </tr>`).join('');
@@ -193,6 +225,8 @@ function renderPricing() {
   $('#setDivisor').value = String(p.settings.divisor);
   $('#setRounding').value = p.settings.rounding;
   $('#divisorEcho').textContent = String(p.settings.divisor);
+  $('#storageUnitEcho').textContent = storageUnitSummary(p);
+  $('#storageUnitTag').textContent = 'per TB or per GB allocated / month';
 }
 
 /* config table edits (delegated) */
@@ -201,15 +235,31 @@ function bindCfg(tableSel) {
   t.addEventListener('input', e => {
     const tr = e.target.closest('tr[data-id]'); if (!tr) return;
     const f = e.target.dataset.f; if (!f) return;
+    if (f === 'unit') return; // selects are handled in the change listener below
     const list = { ratio: P().ratios, storage: P().storage, addon: P().addons }[tr.dataset.kind];
     const item = list.find(x => x.id === tr.dataset.id); if (!item) return;
     if (f === 'price') item.price = parseFloat(e.target.value) || 0;
     else if (f === 'isDefault') { list.forEach(x => x.isDefault = false); item.isDefault = true; }
     else if (f === 'defaultOn') item.defaultOn = e.target.checked;
     else item[f] = e.target.value;
+    if (tr.dataset.kind === 'storage' && f === 'price') {
+      const echo = tr.querySelector('.rate-echo'); // live rate echo without re-rendering (keeps focus)
+      if (echo) echo.textContent = rateStr(item);
+    }
     afterPricingChange(f === 'label' || f === 'name');
   });
-  t.addEventListener('change', e => { if (e.target.dataset.f === 'unit') { const tr = e.target.closest('tr'); const a = P().addons.find(x => x.id === tr.dataset.id); if (a) { a.unit = e.target.value; afterPricingChange(true); } } });
+  t.addEventListener('change', e => {
+    if (e.target.dataset.f !== 'unit') return;
+    const tr = e.target.closest('tr[data-id]'); if (!tr) return;
+    const list = { ratio: P().ratios, storage: P().storage, addon: P().addons }[tr.dataset.kind];
+    const item = (list || []).find(x => x.id === tr.dataset.id); if (!item) return;
+    item.unit = e.target.value;
+    if (tr.dataset.kind === 'storage') {
+      renderPricing(); // refresh price suffix / placeholder / rate echo
+      toast(`${shortTier(item.name)} now priced ${rateStr(item)}.`);
+    }
+    afterPricingChange(true);
+  });
   t.addEventListener('click', e => {
     const btn = e.target.closest('[data-del]'); if (!btn) return;
     const tr = btn.closest('tr'); const kind = btn.dataset.del; const id = tr.dataset.id;
@@ -253,7 +303,7 @@ function renderVms() {
   $('#addonHead').hidden = p.addons.length === 0;
 
   const rOpts = v => p.ratios.map(r => `<option value="${r.id}" ${v === r.id ? 'selected' : ''}>${esc(r.label || r.name)} — $${num(r.price)}/GB</option>`).join('');
-  const sOpts = v => p.storage.map(s => `<option value="${s.id}" ${v === s.id ? 'selected' : ''}>${esc(shortTier(s.name))} — $${num(s.price)}/TB</option>`).join('');
+  const sOpts = v => p.storage.map(s => `<option value="${s.id}" ${v === s.id ? 'selected' : ''}>${esc(shortTier(s.name))} — ${esc(rateStr(s))}</option>`).join('');
 
   $('#vmTable tbody').innerHTML = vms.map((v, i) => `
     <tr data-id="${v.id}">
@@ -281,7 +331,7 @@ function renderVms() {
   }
   const bulkR = $('#bulkRatio'), bulkS = $('#bulkStorage');
   bulkR.innerHTML = '<option value="">Set ratio tier for all…</option>' + p.ratios.map(r => `<option value="${r.id}">${esc(r.label || r.name)}</option>`).join('');
-  bulkS.innerHTML = '<option value="">Set storage tier for all…</option>' + p.storage.map(s => `<option value="${s.id}">${esc(shortTier(s.name))}</option>`).join('');
+  bulkS.innerHTML = '<option value="">Set storage tier for all…</option>' + p.storage.map(s => `<option value="${s.id}">${esc(shortTier(s.name))} — ${esc(rateStr(s))}</option>`).join('');
 }
 const shortTier = n => String(n).replace(/^Enterprise Cloud Storage\s*[—-]\s*/i, '');
 
@@ -352,6 +402,9 @@ function renderResults() {
     th.classList.toggle('sorted', th.dataset.sort === key);
     th.classList.toggle('asc', th.dataset.sort === key && sort.dir === 'asc');
   });
+
+  $('#resStorageNote').textContent = 'Storage: ' + storageUnitSummary(P()) + '.';
+  $('#resStorageNote').hidden = false;
 
   renderRollup(rows);
   renderLocationRollup(rows);
@@ -432,8 +485,9 @@ function renderRollup(rows) {
   p.storage.forEach(st => {
     const rr = rows.filter(r => r.storageTier && r.storageTier.id === st.id);
     if (!rr.length) return;
-    const tb = rr.reduce((a, r) => a + r.tb, 0);
-    out.push([st.sku, `${st.name} (${rr.length} VM${rr.length > 1 ? 's' : ''})`, num(tb) + ' TB', usd(st.price) + ' /TB', rr.reduce((a, r) => a + r.storage, 0)]);
+    const u = SU(st);
+    const qty = rr.reduce((a, r) => a + (u === 'GB' ? r.disk : r.tb), 0);
+    out.push([st.sku, `${st.name} (${rr.length} VM${rr.length > 1 ? 's' : ''})`, num(qty) + ' ' + u, '$' + rateNum(st) + ' /' + u, rr.reduce((a, r) => a + r.storage, 0)]);
   });
   const wins = rows.filter(r => r.windows);
   if (wins.length) out.push([p.spla.sku, p.spla.name, wins.length + ' VMs', usd(p.spla.price) + ' /VM', wins.reduce((a, r) => a + r.spla, 0)]);
@@ -543,7 +597,7 @@ function openMapper(file, parsed) {
   $('#mapDiskUnit').value = guessUnit(pending.map.disk, 'disk');
   $('#mapRamUnit').value = guessUnit(pending.map.ram, 'ram');
   $('#mapRatio').innerHTML = p.ratios.map(r => `<option value="${r.id}" ${r.isDefault ? 'selected' : ''}>${esc(r.label || r.name)}</option>`).join('');
-  $('#mapStorage').innerHTML = p.storage.map(s => `<option value="${s.id}" ${s.isDefault ? 'selected' : ''}>${esc(shortTier(s.name))}</option>`).join('');
+  $('#mapStorage').innerHTML = p.storage.map(s => `<option value="${s.id}" ${s.isDefault ? 'selected' : ''}>${esc(shortTier(s.name))} — ${esc(rateStr(s))}</option>`).join('');
   syncLocationDatalist();
   $('#mapLocation').value = '';
   $('#mapMode').value = VMS().length ? 'append' : 'replace';
@@ -614,17 +668,17 @@ function exportResultsCsv() {
   const rows = locFilter === '' ? all : all.filter(r => r.location === locFilter);
   if (!rows.length) return toast('No VMs to export.', true);
   const p = P();
-  const head = ['Name', 'OS', 'Location', 'RAM_GB', 'Disk_GB', 'Disk_TB', 'RatioTier', 'RatioRate_perGB', 'StorageTier', 'StorageRate_perTB',
+  const head = ['Name', 'OS', 'Location', 'RAM_GB', 'Disk_GB', 'Disk_TB', 'RatioTier', 'RatioRate_perGB', 'StorageTier', 'StorageUnit', 'StorageBilledQty', 'StorageRate_perUnit',
     'Compute_USD', 'VMwareLicensing_USD', 'Storage_USD', 'WindowsSPLA_USD', 'Addons_USD', 'TotalMonthly_USD'];
   const lines = [head];
   rows.forEach(r => lines.push([
     r.vm.name, r.vm.os, r.location, r.ram, r.disk, r2(r.tb), r.ratioLabel, r.ratio ? r.ratio.price : 0,
-    shortTier(r.storageLabel), r.storageTier ? r.storageTier.price : 0,
+    shortTier(r.storageLabel), r.storageUnit, r2(r.storageQty), r.storageTier ? r.storageTier.price : 0,
     r2(r.compute), r2(r.vmware), r2(r.storage), r2(r.spla), r2(r.addons), r2(r.total)
   ]));
   const T = rows.reduce((a, r) => [a[0] + r.ram, a[1] + r.disk, a[2] + r.compute, a[3] + r.vmware, a[4] + r.storage, a[5] + r.spla, a[6] + r.addons, a[7] + r.total], [0, 0, 0, 0, 0, 0, 0, 0]);
   lines.push([]);
-  lines.push(['TOTAL (' + rows.length + ' VMs)', '', '', T[0], T[1], r2(T[1] / p.settings.divisor), '', '', '', '', r2(T[2]), r2(T[3]), r2(T[4]), r2(T[5]), r2(T[6]), r2(T[7])]);
+  lines.push(['TOTAL (' + rows.length + ' VMs)', '', '', T[0], T[1], r2(T[1] / p.settings.divisor), '', '', '', '', '', '', r2(T[2]), r2(T[3]), r2(T[4]), r2(T[5]), r2(T[6]), r2(T[7])]);
 
   // --- location summary block ---
   const groups = locationTotals(rows);
@@ -639,6 +693,8 @@ function exportResultsCsv() {
   lines.push(['Location filter', locFilter || 'All locations']);
   lines.push(['Generated', new Date().toLocaleString()]);
   lines.push(['GB to TB divisor', p.settings.divisor]);
+  lines.push(['Storage pricing basis', storageUnitSummary(p)]);
+  p.storage.forEach(s => lines.push(['Storage tier rate', `${s.sku ? s.sku + ' · ' : ''}${s.name}`, '$' + rateNum(s) + ' per ' + SU(s)]));
   lines.push(['VMware licensing applied', p.vmwareLic.enabled ? 'yes @ ' + usd(p.vmwareLic.price) + '/GB RAM' : 'no']);
   lines.push(['Windows SPLA', usd(p.spla.price) + ' per Windows VM']);
   const csv = lines.map(l => l.map(c => {
@@ -677,7 +733,7 @@ function initEvents() {
     renderPricing(); renderVms(); save(true);
   });
   $('#btnAddStorage').addEventListener('click', () => {
-    P().storage.push({ id: uid(), sku: '', name: 'New storage tier', price: 0, isDefault: false });
+    P().storage.push({ id: uid(), sku: '', name: 'New storage tier', price: 0, unit: 'TB', isDefault: false });
     renderPricing(); renderVms(); save(true);
   });
   $('#btnAddAddon').addEventListener('click', () => {
@@ -698,7 +754,7 @@ function initEvents() {
   $('#licVmPrice').addEventListener('input', e => { P().vmwareLic.price = parseFloat(e.target.value) || 0; afterPricingChange(false); });
   $('#splaPrice').addEventListener('input', e => { P().spla.price = parseFloat(e.target.value) || 0; afterPricingChange(false); });
   $('#licVmEnabled').addEventListener('change', e => { P().vmwareLic.enabled = e.target.checked; afterPricingChange(false); toast(e.target.checked ? 'VMware licensing applied to all VMs.' : 'VMware licensing excluded.'); });
-  $('#setDivisor').addEventListener('change', e => { P().settings.divisor = parseInt(e.target.value, 10); $('#divisorEcho').textContent = e.target.value; afterPricingChange(false); });
+  $('#setDivisor').addEventListener('change', e => { P().settings.divisor = parseInt(e.target.value, 10); $('#divisorEcho').textContent = e.target.value; $('#storageUnitEcho').textContent = storageUnitSummary(P()); afterPricingChange(false); });
   $('#setRounding').addEventListener('change', e => { P().settings.rounding = e.target.value; afterPricingChange(false); });
 
   // VM table
@@ -862,7 +918,7 @@ function initEvents() {
         let last = null;
         list.forEach(c => {
           const id = uid();
-          const pr = Object.assign(defaultPricing(), c.pricing);
+          const pr = normalizePricing(Object.assign(defaultPricing(), c.pricing));
           const dR = (pr.ratios.find(r => r.isDefault) || pr.ratios[0] || {}).id || '';
           const dS = (pr.storage.find(s => s.isDefault) || pr.storage[0] || {}).id || '';
           const cl = { id, name: (c.name || 'Imported client') + (Object.values(state.clients).some(x => x.name === c.name) ? ' (imported)' : ''), pricing: pr,
