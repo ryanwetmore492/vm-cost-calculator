@@ -195,13 +195,16 @@
     <span class="muted small">Bulk apply to all VMs:</span>
     <select id="bulkRatio" aria-label="Bulk apply ratio tier"><option value="">Ratio tier…</option></select>
     <select id="bulkStorage" aria-label="Bulk apply storage tier"><option value="">Storage tier…</option></select>
+    <span class="bulk-sep" aria-hidden="true"></span>
+    <input class="in" id="bulkLocation" list="locList" placeholder="Location for all VMs…" aria-label="Bulk apply data center location">
+    <button class="btn ghost" id="btnBulkLocation">Apply location</button>
   </div>
 
   <div class="card flush">
     <div class="table-scroll">
       <table class="vm-table" id="vmTable">
         <thead><tr>
-          <th class="w-idx">#</th><th>Name</th><th>OS</th><th class="num">RAM (GB)</th><th class="num">Disk (GB)</th>
+          <th class="w-idx">#</th><th>Name</th><th>OS</th><th>Location</th><th class="num">RAM (GB)</th><th class="num">Disk (GB)</th>
           <th>Ratio tier</th><th>Storage tier</th><th id="addonHead">Add-ons</th><th class="w-act"></th>
         </tr></thead>
         <tbody></tbody>
@@ -235,11 +238,18 @@
 
   <div class="cards" id="summaryCards"></div>
 
+  <div class="bulk-bar filter-bar" id="locFilterBar" hidden>
+    <label class="inline-field"><span>Location filter</span>
+      <select id="locFilter" aria-label="Filter results by data center location"><option value="">All locations</option></select>
+    </label>
+    <span class="muted small">Filters the per-VM table, summary cards, SKU roll-up, location roll-up and CSV export.</span>
+  </div>
+
   <div class="card flush">
     <div class="table-scroll">
       <table class="res-table" id="resTable">
         <thead><tr>
-          <th data-sort="name">Name</th><th data-sort="os">OS</th><th data-sort="ram" class="num">RAM GB</th>
+          <th data-sort="name">Name</th><th data-sort="os">OS</th><th data-sort="location">Location</th><th data-sort="ram" class="num">RAM GB</th>
           <th data-sort="disk" class="num">Disk GB</th><th data-sort="ratio">Ratio</th><th data-sort="storage">Storage tier</th>
           <th data-sort="compute" class="num">Compute $</th><th data-sort="vmware" class="num">VMware lic $</th>
           <th data-sort="storageCost" class="num">Storage $</th><th data-sort="spla" class="num">Win SPLA $</th>
@@ -254,6 +264,25 @@
       <h3>Nothing to price yet</h3>
       <p>Results appear as soon as this client has at least one VM in inventory.</p>
       <div class="empty-btns"><button class="btn primary" id="btnGoInventory">Go to VM inventory</button></div>
+    </div>
+  </div>
+
+  <div class="card" id="locRollup" hidden>
+    <div class="card-head">
+      <h2>Cost by location</h2>
+      <span class="unit-tag" id="locRollupCount"></span>
+    </div>
+    <p class="muted small">Subtotals per data center. VMs without a location are grouped as “Unassigned”.</p>
+    <div class="table-scroll">
+      <table class="cfg-table loc-table" id="locationRollup">
+        <thead><tr>
+          <th>Location</th><th class="num">VMs</th><th class="num">RAM GB</th><th class="num">Disk GB</th>
+          <th class="num">Compute $</th><th class="num">VMware lic $</th><th class="num">Storage $</th>
+          <th class="num">Win SPLA $</th><th class="num">Add-ons $</th><th class="num">Total / mo</th><th class="num">Share</th>
+        </tr></thead>
+        <tbody></tbody>
+        <tfoot></tfoot>
+      </table>
     </div>
   </div>
 
@@ -293,6 +322,9 @@
         </label>
         <label class="field"><span>Fallback ratio tier</span><select id="mapRatio"></select></label>
         <label class="field"><span>Fallback storage tier</span><select id="mapStorage"></select></label>
+        <label class="field"><span>Default location</span>
+          <input class="in" id="mapLocation" list="locList" placeholder="e.g. Columbus - DUB" aria-label="Default location for rows without one">
+        </label>
         <label class="field"><span>Existing VMs</span>
           <select id="mapMode"><option value="replace">Replace inventory</option><option value="append">Append to inventory</option></select>
         </label>
@@ -312,7 +344,7 @@
 
 <div class="toast-wrap" id="toasts" aria-live="polite"></div>
 
-<script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js" integrity="sha384-D/t0ZMqQW31H3az8ktEiNb39wyKnS82iFY52QPACM+IjKW3jDUhyIgh2PApRqJZs" crossorigin="anonymous"></script>
 <script src="app.js"></script>
 </body>
 </html>

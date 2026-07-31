@@ -48,12 +48,29 @@ function newClient(name, pricing) {
 function blankVm(pricing) {
   const dr = (pricing.ratios.find(r => r.isDefault) || pricing.ratios[0] || {}).id || '';
   const ds = (pricing.storage.find(s => s.isDefault) || pricing.storage[0] || {}).id || '';
-  return { id: uid(), name: '', os: 'Linux', ram: 0, disk: 0, ratioId: dr, storageId: ds, addons: pricing.addons.filter(a => a.defaultOn).map(a => a.id) };
+  return { id: uid(), name: '', os: 'Linux', location: '', ram: 0, disk: 0, ratioId: dr, storageId: ds, addons: pricing.addons.filter(a => a.defaultOn).map(a => a.id) };
+}
+
+/* ---------------- location helpers ----------------
+   Location is optional free text. Older saved profiles have no `location`
+   field at all — those VMs read as "Unassigned" everywhere. */
+const UNASSIGNED = 'Unassigned';
+const locOf = vm => (String((vm && vm.location) || '').trim() || UNASSIGNED);
+function locationsUsed(vms) {
+  const seen = new Map();
+  (vms || VMS()).forEach(v => { const l = String(v.location || '').trim(); if (l && !seen.has(l.toLowerCase())) seen.set(l.toLowerCase(), l); });
+  return Array.from(seen.values()).sort((a, b) => a.localeCompare(b));
+}
+function syncLocationDatalist() {
+  let dl = $('#locList');
+  if (!dl) { dl = document.createElement('datalist'); dl.id = 'locList'; document.body.appendChild(dl); }
+  dl.innerHTML = locationsUsed().map(l => `<option value="${esc(l)}">`).join('');
 }
 
 /* ---------------- state ---------------- */
 let state = load();
 let sort = { key: 'total', dir: 'desc' };
+let locFilter = ''; // '' = all locations
 let pending = null; // csv import staging
 
 function load() {
@@ -62,7 +79,12 @@ function load() {
     if (raw) {
       const s = JSON.parse(raw);
       if (s && s.clients && Object.keys(s.clients).length) {
-        Object.values(s.clients).forEach(c => { c.pricing = Object.assign(defaultPricing(), c.pricing); c.vms = c.vms || []; });
+        Object.values(s.clients).forEach(c => {
+          c.pricing = Object.assign(defaultPricing(), c.pricing);
+          c.vms = c.vms || [];
+          // backward compat: profiles saved before locations existed
+          c.vms.forEach(v => { if (typeof v.location !== 'string') v.location = ''; });
+        });
         if (!s.clients[s.activeId]) s.activeId = Object.keys(s.clients)[0];
         return s;
       }
@@ -117,7 +139,7 @@ function costVm(vm) {
   addons = round(addons);
   const total = r2(compute + vmware + storage + spla + addons);
   return {
-    vm, ram, disk, tb, ratio, storageTier: st,
+    vm, ram, disk, tb, ratio, storageTier: st, location: locOf(vm),
     ratioLabel: ratio ? (ratio.label || ratio.name) : '— none —',
     storageLabel: st ? st.name : '— none —',
     compute, vmware, storage, spla, addons, addonDetail, total, windows: isWin(vm.os)
@@ -238,6 +260,7 @@ function renderVms() {
       <td class="w-idx mono">${i + 1}</td>
       <td><input class="in" data-f="name" value="${esc(v.name)}" placeholder="vm-name" aria-label="VM name"></td>
       <td><div class="os-field"><input class="in" data-f="os" list="osList" value="${esc(v.os)}" placeholder="Operating system" aria-label="Operating system">${isWin(v.os) ? '<span class="badge" title="Windows SPLA applies">SPLA</span>' : ''}</div></td>
+      <td><input class="in" data-f="location" list="locList" value="${esc(v.location || '')}" placeholder="Unassigned" aria-label="Data center location"></td>
       <td class="num"><input class="in num mono" type="number" min="0" step="1" data-f="ram" value="${v.ram}" aria-label="RAM in GB"></td>
       <td class="num"><input class="in num mono" type="number" min="0" step="1" data-f="disk" value="${v.disk}" aria-label="Provisioned disk in GB"></td>
       <td><select data-f="ratioId" aria-label="Ratio tier">${rOpts(v.ratioId)}</select></td>
@@ -250,6 +273,7 @@ function renderVms() {
       </td>
     </tr>`).join('');
 
+  syncLocationDatalist();
   if (!$('#osList')) {
     const dl = document.createElement('datalist'); dl.id = 'osList';
     dl.innerHTML = ['Microsoft Windows Server 2022', 'Microsoft Windows Server 2019', 'Microsoft Windows 11', 'Ubuntu Linux 22.04', 'Red Hat Enterprise Linux 9', 'CentOS Linux 7', 'Other'].map(o => `<option value="${o}">`).join('');
@@ -263,11 +287,15 @@ const shortTier = n => String(n).replace(/^Enterprise Cloud Storage\s*[—-]\s*/
 
 /* ================= RENDER: results ================= */
 function renderResults() {
-  const rows = allCosts();
-  const has = rows.length > 0;
+  const all = allCosts();
+  renderLocationFilter(all);
+  const rows = locFilter === '' ? all : all.filter(r => r.location === locFilter);
+  const has = all.length > 0;
   $('#resEmpty').hidden = has;
   $('#resTable').hidden = !has;
   $('#tierRollup').hidden = !has;
+  $('#locRollup').hidden = !has;
+  $('#locFilterBar').hidden = !has;
   $('#summaryCards').innerHTML = '';
   if (!has) { $('#resultsSub').textContent = 'Monthly recurring cost per VM.'; return; }
 
@@ -278,7 +306,9 @@ function renderResults() {
   }), { compute: 0, vmware: 0, storage: 0, spla: 0, addons: 0, total: 0, ram: 0, disk: 0 });
   const winCount = rows.filter(r => r.windows).length;
 
-  $('#resultsSub').textContent = `${rows.length} VM${rows.length === 1 ? '' : 's'} · ${active().name} · monthly recurring, USD`;
+  $('#resultsSub').textContent = `${rows.length} VM${rows.length === 1 ? '' : 's'} · ${active().name}`
+    + (locFilter ? ` · location: ${locFilter}` : ` · ${locationsAll(all).length} location${locationsAll(all).length === 1 ? '' : 's'}`)
+    + ' · monthly recurring, USD';
 
   $('#summaryCards').innerHTML = `
     ${kpi('Total VMs', rows.length, `${winCount} Windows · ${rows.length - winCount} non-Windows`)}
@@ -289,13 +319,14 @@ function renderResults() {
 
   const dir = sort.dir === 'asc' ? 1 : -1;
   const key = sort.key;
-  const val = r => ({ name: r.vm.name.toLowerCase(), os: String(r.vm.os).toLowerCase(), ram: r.ram, disk: r.disk, ratio: r.ratioLabel, storage: r.storageLabel, compute: r.compute, vmware: r.vmware, storageCost: r.storage, spla: r.spla, addons: r.addons, total: r.total }[key]);
+  const val = r => ({ name: r.vm.name.toLowerCase(), os: String(r.vm.os).toLowerCase(), location: r.location.toLowerCase(), ram: r.ram, disk: r.disk, ratio: r.ratioLabel, storage: r.storageLabel, compute: r.compute, vmware: r.vmware, storageCost: r.storage, spla: r.spla, addons: r.addons, total: r.total }[key]);
   const sorted = rows.slice().sort((a, a2) => { const x = val(a), y = val(a2); return (typeof x === 'string' ? x.localeCompare(y) : x - y) * dir; });
 
   $('#resTable tbody').innerHTML = sorted.map(r => `
     <tr>
       <td class="txt strong">${esc(r.vm.name || '(unnamed)')}</td>
       <td class="txt"><span class="os-tag ${r.windows ? 'win' : /linux|ubuntu|centos|rhel|red hat|debian|suse/i.test(r.vm.os) ? 'lin' : ''}">${esc(r.vm.os || '—')}</span></td>
+      <td class="txt loc${r.location === UNASSIGNED ? ' unassigned' : ''}" title="${esc(r.location)}">${esc(r.location)}</td>
       <td class="num">${num(r.ram)}</td>
       <td class="num">${num(r.disk)}</td>
       <td class="txt">${esc(r.ratioLabel)}</td>
@@ -309,7 +340,7 @@ function renderResults() {
     </tr>`).join('');
 
   $('#resTable tfoot').innerHTML = `<tr>
-      <td class="label" colspan="2">Grand total — ${rows.length} VMs</td>
+      <td class="label" colspan="3">${locFilter ? esc(locFilter) + ' subtotal' : 'Grand total'} — ${rows.length} VMs</td>
       <td class="num">${num(T.ram)}</td><td class="num">${num(T.disk)}</td>
       <td colspan="2"></td>
       <td class="num">${usd(T.compute)}</td><td class="num">${usd(T.vmware)}</td><td class="num">${usd(T.storage)}</td>
@@ -323,6 +354,64 @@ function renderResults() {
   });
 
   renderRollup(rows);
+  renderLocationRollup(rows);
+}
+const locationsAll = rows => Array.from(new Set(rows.map(r => r.location))).sort(locSort);
+/* “Unassigned” always sorts last */
+function locSort(a, b) {
+  if (a === UNASSIGNED) return 1;
+  if (b === UNASSIGNED) return -1;
+  return a.localeCompare(b);
+}
+function renderLocationFilter(all) {
+  const sel = $('#locFilter');
+  const locs = locationsAll(all);
+  if (locFilter && !locs.includes(locFilter)) locFilter = '';
+  sel.innerHTML = `<option value="">All locations (${locs.length})</option>`
+    + locs.map(l => `<option value="${esc(l)}" ${l === locFilter ? 'selected' : ''}>${esc(l)} — ${all.filter(r => r.location === l).length} VM${all.filter(r => r.location === l).length === 1 ? '' : 's'}</option>`).join('');
+  sel.value = locFilter;
+}
+function locationTotals(rows) {
+  const map = new Map();
+  rows.forEach(r => {
+    const k = r.location;
+    if (!map.has(k)) map.set(k, { location: k, vms: 0, ram: 0, disk: 0, tb: 0, compute: 0, vmware: 0, storage: 0, spla: 0, addons: 0, total: 0 });
+    const o = map.get(k);
+    o.vms++; o.ram += r.ram; o.disk += r.disk; o.tb += r.tb;
+    o.compute += r.compute; o.vmware += r.vmware; o.storage += r.storage;
+    o.spla += r.spla; o.addons += r.addons; o.total += r.total;
+  });
+  return Array.from(map.values()).sort((a, b) => locSort(a.location, b.location));
+}
+function renderLocationRollup(rows) {
+  const groups = locationTotals(rows);
+  const G = groups.reduce((a, g) => ({
+    vms: a.vms + g.vms, ram: a.ram + g.ram, disk: a.disk + g.disk,
+    compute: a.compute + g.compute, vmware: a.vmware + g.vmware, storage: a.storage + g.storage,
+    spla: a.spla + g.spla, addons: a.addons + g.addons, total: a.total + g.total
+  }), { vms: 0, ram: 0, disk: 0, compute: 0, vmware: 0, storage: 0, spla: 0, addons: 0, total: 0 });
+
+  $('#locRollupCount').textContent = `${groups.length} location${groups.length === 1 ? '' : 's'}`;
+  $('#locationRollup tbody').innerHTML = groups.map(g => `<tr>
+      <td class="strong${g.location === UNASSIGNED ? ' unassigned' : ''}">${esc(g.location)}</td>
+      <td class="num mono">${g.vms}</td>
+      <td class="num mono">${num(g.ram)}</td>
+      <td class="num mono">${num(g.disk)}</td>
+      <td class="num mono${g.compute ? '' : ' zero'}">${usd(g.compute)}</td>
+      <td class="num mono${g.vmware ? '' : ' zero'}">${usd(g.vmware)}</td>
+      <td class="num mono${g.storage ? '' : ' zero'}">${usd(g.storage)}</td>
+      <td class="num mono${g.spla ? '' : ' zero'}">${usd(g.spla)}</td>
+      <td class="num mono${g.addons ? '' : ' zero'}">${usd(g.addons)}</td>
+      <td class="num mono strong">${usd(g.total)}</td>
+      <td class="num mono muted">${G.total ? (g.total / G.total * 100).toFixed(1) : '0.0'}%</td>
+    </tr>`).join('');
+  $('#locationRollup tfoot').innerHTML = `<tr>
+      <td class="label">All locations</td>
+      <td class="num">${G.vms}</td><td class="num">${num(G.ram)}</td><td class="num">${num(G.disk)}</td>
+      <td class="num">${usd(G.compute)}</td><td class="num">${usd(G.vmware)}</td><td class="num">${usd(G.storage)}</td>
+      <td class="num">${usd(G.spla)}</td><td class="num">${usd(G.addons)}</td>
+      <td class="num" style="color:var(--primary)">${usd(G.total)}</td><td class="num">100%</td>
+    </tr>`;
 }
 function kpi(k, v, s, hero) {
   return `<div class="kpi${hero ? ' hero' : ''}"><div class="k">${k}</div><div class="v">${v}</div><div class="s">${s}</div></div>`;
@@ -377,10 +466,11 @@ function download(filename, text, mime) {
   document.body.appendChild(a); a.click(); a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 1500);
 }
-const SAMPLE_CSV = `Name,OS,RAM_GB,Disk_GB,Ratio,StorageTier
-WEB01,Microsoft Windows Server 2022,16,200,4:1,Standard Flash
-SQL01,Microsoft Windows Server 2019,64,1024,2:1,High Performance Flash
-APP01,Ubuntu Linux 22.04,32,500,4:1,Standard Flash
+const SAMPLE_CSV = `Name,OS,Location,RAM_GB,Disk_GB,Ratio,StorageTier
+WEB01,Microsoft Windows Server 2022,Columbus - DUB,16,200,4:1,Standard Flash
+SQL01,Microsoft Windows Server 2019,Columbus - DUB,64,1024,2:1,High Performance Flash
+APP01,Ubuntu Linux 22.04,Indianapolis - 701 Congressional,32,500,4:1,Standard Flash
+FILE01,Microsoft Windows Server 2022,Indianapolis - 701 Congressional,8,1500,4:1,Standard Flash
 `;
 
 const FIELDS = [
@@ -388,6 +478,7 @@ const FIELDS = [
   { key: 'os', label: 'Operating system', req: false, hints: ['os', 'os according to the configuration file', 'guest os', 'guest', 'operating system', 'os according to the vmware tools'] },
   { key: 'ram', label: 'RAM', req: true, hints: ['ram', 'ram_gb', 'ram gb', 'memory', 'memory mb', 'memory (gb)', 'memory size', 'mem'] },
   { key: 'disk', label: 'Provisioned disk', req: true, hints: ['disk', 'disk_gb', 'disk gb', 'provisioned', 'provisioned mb', 'provisioned mib', 'storage', 'total disk capacity', 'capacity', 'in use mb', 'allocated'] },
+  { key: 'location', label: 'Location (optional)', req: false, hints: ['location', 'site', 'datacenter', 'data center', 'dc', 'data centre', 'facility', 'region', 'site name', 'dc name', 'location name'] },
   { key: 'ratio', label: 'Ratio tier (optional)', req: false, hints: ['ratio', 'ratio tier', 'processor ratio', 'tier', 'compute tier'] },
   { key: 'storage', label: 'Storage tier (optional)', req: false, hints: ['storagetier', 'storage tier', 'storage_tier', 'datastore', 'storage policy', 'storage profile', 'policy'] }
 ];
@@ -405,7 +496,10 @@ function autoMap(headers) {
     if (!best) for (const h of headers) {
       if (used.has(h)) continue;
       const n = norm(h);
-      if (f.hints.some(x => n.includes(x))) { best = h; break; }
+      // short hints (dc, os, vm, ram…) must match as whole words to avoid false positives like “Org vDC” → DC
+      if (f.hints.some(x => x.length <= 3
+        ? new RegExp('\\b' + x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\b').test(n)
+        : n.includes(x))) { best = h; break; }
     }
     if (best) { map[f.key] = best; used.add(best); }
   });
@@ -450,6 +544,8 @@ function openMapper(file, parsed) {
   $('#mapRamUnit').value = guessUnit(pending.map.ram, 'ram');
   $('#mapRatio').innerHTML = p.ratios.map(r => `<option value="${r.id}" ${r.isDefault ? 'selected' : ''}>${esc(r.label || r.name)}</option>`).join('');
   $('#mapStorage').innerHTML = p.storage.map(s => `<option value="${s.id}" ${s.isDefault ? 'selected' : ''}>${esc(shortTier(s.name))}</option>`).join('');
+  syncLocationDatalist();
+  $('#mapLocation').value = '';
   $('#mapMode').value = VMS().length ? 'append' : 'replace';
   $('#mapModal').hidden = false;
   refreshPreview();
@@ -463,6 +559,7 @@ function buildImport() {
   const dScale = { GB: 1, MB: 1 / 1024, TB: 1024 }[$('#mapDiskUnit').value];
   const rScale = { GB: 1, MB: 1 / 1024 }[$('#mapRamUnit').value];
   const fbR = $('#mapRatio').value, fbS = $('#mapStorage').value;
+  const fbLoc = String($('#mapLocation').value || '').trim();
   const warns = [];
   const vms = [];
   pending.rows.forEach((row, i) => {
@@ -481,6 +578,7 @@ function buildImport() {
       id: uid(),
       name: name || '(unnamed)',
       os: m.os ? String(row[m.os] ?? '').trim() : '',
+      location: (m.location ? String(row[m.location] ?? '').trim() : '') || fbLoc,
       ram: r2((isFinite(ramRaw) ? ramRaw : 0) * rScale),
       disk: r2((isFinite(diskRaw) ? diskRaw : 0) * dScale),
       ratioId: rt ? rt.id : fbR,
@@ -492,15 +590,15 @@ function buildImport() {
 }
 function refreshPreview() {
   const { vms, warns, missing } = buildImport();
-  const cols = ['name', 'os', 'ram', 'disk', 'ratioId', 'storageId'];
-  const head = ['Name', 'OS', 'RAM GB', 'Disk GB', 'Ratio', 'Storage tier'];
+  const head = ['Name', 'OS', 'Location', 'RAM GB', 'Disk GB', 'Ratio', 'Storage tier'];
   $('#mapPreview thead').innerHTML = `<tr>${head.map(h => `<th>${h}</th>`).join('')}</tr>`;
   $('#mapPreview tbody').innerHTML = vms.slice(0, 8).map(v => `<tr>
       <td>${esc(v.name)}</td><td>${esc(v.os) || '<span class="dash">—</span>'}</td>
+      <td class="${v.location ? '' : 'unassigned'}">${esc(v.location || UNASSIGNED)}</td>
       <td class="num mono">${num(v.ram)}</td><td class="num mono">${num(v.disk)}</td>
       <td>${esc((P().ratios.find(r => r.id === v.ratioId) || {}).label || '—')}</td>
       <td>${esc(shortTier((P().storage.find(s => s.id === v.storageId) || {}).name || '—'))}</td></tr>`).join('')
-    || '<tr><td colspan="6" class="muted">No importable rows with the current mapping.</td></tr>';
+    || '<tr><td colspan="7" class="muted">No importable rows with the current mapping.</td></tr>';
   $('#mapPrevInfo').textContent = `${vms.length} row(s) ready · showing first ${Math.min(8, vms.length)}`;
   const msgs = [];
   if (missing.length) msgs.push(`<strong>Required column${missing.length > 1 ? 's' : ''} not mapped:</strong> ${missing.join(', ')}.`);
@@ -512,28 +610,41 @@ function refreshPreview() {
 }
 
 function exportResultsCsv() {
-  const rows = allCosts();
+  const all = allCosts();
+  const rows = locFilter === '' ? all : all.filter(r => r.location === locFilter);
   if (!rows.length) return toast('No VMs to export.', true);
   const p = P();
-  const head = ['Name', 'OS', 'RAM_GB', 'Disk_GB', 'Disk_TB', 'RatioTier', 'RatioRate_perGB', 'StorageTier', 'StorageRate_perTB',
+  const head = ['Name', 'OS', 'Location', 'RAM_GB', 'Disk_GB', 'Disk_TB', 'RatioTier', 'RatioRate_perGB', 'StorageTier', 'StorageRate_perTB',
     'Compute_USD', 'VMwareLicensing_USD', 'Storage_USD', 'WindowsSPLA_USD', 'Addons_USD', 'TotalMonthly_USD'];
   const lines = [head];
   rows.forEach(r => lines.push([
-    r.vm.name, r.vm.os, r.ram, r.disk, r2(r.tb), r.ratioLabel, r.ratio ? r.ratio.price : 0,
+    r.vm.name, r.vm.os, r.location, r.ram, r.disk, r2(r.tb), r.ratioLabel, r.ratio ? r.ratio.price : 0,
     shortTier(r.storageLabel), r.storageTier ? r.storageTier.price : 0,
     r2(r.compute), r2(r.vmware), r2(r.storage), r2(r.spla), r2(r.addons), r2(r.total)
   ]));
   const T = rows.reduce((a, r) => [a[0] + r.ram, a[1] + r.disk, a[2] + r.compute, a[3] + r.vmware, a[4] + r.storage, a[5] + r.spla, a[6] + r.addons, a[7] + r.total], [0, 0, 0, 0, 0, 0, 0, 0]);
   lines.push([]);
-  lines.push(['TOTAL (' + rows.length + ' VMs)', '', T[0], T[1], r2(T[1] / p.settings.divisor), '', '', '', '', r2(T[2]), r2(T[3]), r2(T[4]), r2(T[5]), r2(T[6]), r2(T[7])]);
+  lines.push(['TOTAL (' + rows.length + ' VMs)', '', '', T[0], T[1], r2(T[1] / p.settings.divisor), '', '', '', '', r2(T[2]), r2(T[3]), r2(T[4]), r2(T[5]), r2(T[6]), r2(T[7])]);
+
+  // --- location summary block ---
+  const groups = locationTotals(rows);
+  lines.push([]);
+  lines.push(['COST BY LOCATION']);
+  lines.push(['Location', 'VMs', 'RAM_GB', 'Disk_GB', 'Disk_TB', 'Compute_USD', 'VMwareLicensing_USD', 'Storage_USD', 'WindowsSPLA_USD', 'Addons_USD', 'TotalMonthly_USD', 'ShareOfTotal_pct']);
+  groups.forEach(g => lines.push([g.location, g.vms, r2(g.ram), r2(g.disk), r2(g.tb), r2(g.compute), r2(g.vmware), r2(g.storage), r2(g.spla), r2(g.addons), r2(g.total), T[7] ? r2(g.total / T[7] * 100) : 0]));
+  lines.push(['All locations (' + groups.length + ')', rows.length, r2(T[0]), r2(T[1]), r2(T[1] / p.settings.divisor), r2(T[2]), r2(T[3]), r2(T[4]), r2(T[5]), r2(T[6]), r2(T[7]), 100]);
+
   lines.push([]);
   lines.push(['Client', active().name]);
+  lines.push(['Location filter', locFilter || 'All locations']);
   lines.push(['Generated', new Date().toLocaleString()]);
   lines.push(['GB to TB divisor', p.settings.divisor]);
   lines.push(['VMware licensing applied', p.vmwareLic.enabled ? 'yes @ ' + usd(p.vmwareLic.price) + '/GB RAM' : 'no']);
   lines.push(['Windows SPLA', usd(p.spla.price) + ' per Windows VM']);
   const csv = lines.map(l => l.map(c => {
-    const s = String(c ?? '');
+    let s = String(c ?? '');
+    // Neutralize spreadsheet formula injection (leading = + - @) in text cells
+    if (/^[=+\-@]/.test(s) && isNaN(Number(s))) s = "'" + s;
     return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
   }).join(',')).join('\r\n');
   const slug = active().name.replace(/[^a-z0-9]+/gi, '-').toLowerCase();
@@ -598,6 +709,7 @@ function initEvents() {
     const f = e.target.dataset.f;
     if (f === 'ram' || f === 'disk') vm[f] = parseFloat(e.target.value) || 0;
     else if (f === 'name') vm.name = e.target.value;
+    else if (f === 'location') vm.location = e.target.value;
     else if (f === 'os') {
       const was = isWin(vm.os); vm.os = e.target.value;
       if (was !== isWin(vm.os)) { renderVms(); const el = $(`tr[data-id="${vm.id}"] [data-f="os"]`, vmt); if (el) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); } }
@@ -607,6 +719,7 @@ function initEvents() {
   vmt.addEventListener('change', e => {
     const tr = e.target.closest('tr[data-id]'); if (!tr) return;
     const vm = VMS().find(v => v.id === tr.dataset.id); if (!vm) return;
+    if (e.target.dataset.f === 'location') syncLocationDatalist(); // refresh autocomplete after edit
     if (e.target.dataset.f === 'ratioId') vm.ratioId = e.target.value;
     if (e.target.dataset.f === 'storageId') vm.storageId = e.target.value;
     if (e.target.dataset.addon) {
@@ -637,11 +750,21 @@ function initEvents() {
   });
   $('#bulkRatio').addEventListener('change', e => { if (!e.target.value) return; VMS().forEach(v => v.ratioId = e.target.value); e.target.value = ''; renderVms(); renderResults(); save(true); toast('Ratio tier applied to all VMs.'); });
   $('#bulkStorage').addEventListener('change', e => { if (!e.target.value) return; VMS().forEach(v => v.storageId = e.target.value); e.target.value = ''; renderVms(); renderResults(); save(true); toast('Storage tier applied to all VMs.'); });
+  $('#btnBulkLocation').addEventListener('click', () => {
+    const val = String($('#bulkLocation').value || '').trim();
+    if (!VMS().length) return;
+    if (!confirm(val ? `Set location “${val}” on all ${VMS().length} VMs?` : `Clear the location on all ${VMS().length} VMs (they become “${UNASSIGNED}”)?`)) return;
+    VMS().forEach(v => v.location = val);
+    $('#bulkLocation').value = '';
+    renderVms(); renderResults(); save(true);
+    toast(val ? `Location “${val}” applied to all VMs.` : 'Location cleared on all VMs.');
+  });
+  $('#locFilter').addEventListener('change', e => { locFilter = e.target.value; renderResults(); });
 
   // results sorting / export
   $$('#resTable th[data-sort]').forEach(th => th.addEventListener('click', () => {
     if (sort.key === th.dataset.sort) sort.dir = sort.dir === 'asc' ? 'desc' : 'asc';
-    else sort = { key: th.dataset.sort, dir: ['name', 'os', 'ratio', 'storage'].includes(th.dataset.sort) ? 'asc' : 'desc' };
+    else sort = { key: th.dataset.sort, dir: ['name', 'os', 'location', 'ratio', 'storage'].includes(th.dataset.sort) ? 'asc' : 'desc' };
     renderResults();
   }));
   $('#btnExportCsv').addEventListener('click', exportResultsCsv);
@@ -668,7 +791,8 @@ function initEvents() {
     if (e.target.dataset.map === 'ram') $('#mapRamUnit').value = guessUnit(e.target.value, 'ram');
     refreshPreview();
   });
-  ['#mapDiskUnit', '#mapRamUnit', '#mapRatio', '#mapStorage'].forEach(s => $(s).addEventListener('change', refreshPreview));
+  ['#mapDiskUnit', '#mapRamUnit', '#mapRatio', '#mapStorage', '#mapLocation'].forEach(s => $(s).addEventListener('change', refreshPreview));
+  $('#mapLocation').addEventListener('input', refreshPreview);
   $$('#mapModal [data-close]').forEach(b => b.addEventListener('click', () => { $('#mapModal').hidden = true; pending = null; }));
   $('#mapModal').addEventListener('click', e => { if (e.target.id === 'mapModal') { $('#mapModal').hidden = true; pending = null; } });
   $('#btnConfirmImport').addEventListener('click', () => {
@@ -682,7 +806,7 @@ function initEvents() {
   });
 
   // clients
-  $('#clientSelect').addEventListener('change', e => { state.activeId = e.target.value; renderAll(); save(true); });
+  $('#clientSelect').addEventListener('change', e => { state.activeId = e.target.value; locFilter = ''; renderAll(); save(true); });
   $('#btnSaveClient').addEventListener('click', () => save());
   $('#btnNewClient').addEventListener('click', () => {
     const name = prompt('New client name:', 'Client ' + (Object.keys(state.clients).length + 1));
@@ -738,7 +862,15 @@ function initEvents() {
         let last = null;
         list.forEach(c => {
           const id = uid();
-          const cl = { id, name: (c.name || 'Imported client') + (Object.values(state.clients).some(x => x.name === c.name) ? ' (imported)' : ''), pricing: Object.assign(defaultPricing(), c.pricing), vms: (c.vms || []).map(v => Object.assign({}, v, { id: uid() })), updated: Date.now() };
+          const pr = Object.assign(defaultPricing(), c.pricing);
+          const dR = (pr.ratios.find(r => r.isDefault) || pr.ratios[0] || {}).id || '';
+          const dS = (pr.storage.find(s => s.isDefault) || pr.storage[0] || {}).id || '';
+          const cl = { id, name: (c.name || 'Imported client') + (Object.values(state.clients).some(x => x.name === c.name) ? ' (imported)' : ''), pricing: pr,
+            vms: (c.vms || []).map(v => Object.assign({}, v, {
+              id: uid(),
+              location: typeof v.location === 'string' ? v.location : '', // legacy profiles: no location -> Unassigned
+              ratioId: v.ratioId || dR, storageId: v.storageId || dS, addons: v.addons || []
+            })), updated: Date.now() };
           state.clients[id] = cl; last = id;
         });
         state.activeId = last; renderAll(); save(true);
@@ -771,7 +903,7 @@ if (!STORE.getItem(LS_KEY)) {
     return res.data.map(row => {
       const rt = matchTier(p.ratios, row.Ratio, ['label', 'name', 'sku']);
       const st = matchTier(p.storage, row.StorageTier, ['name', 'sku']);
-      return { id: uid(), name: row.Name, os: row.OS, ram: parseFloat(row.RAM_GB) || 0, disk: parseFloat(row.Disk_GB) || 0, ratioId: (rt || p.ratios[0]).id, storageId: (st || p.storage[0]).id, addons: [] };
+      return { id: uid(), name: row.Name, os: row.OS, location: (row.Location || '').trim(), ram: parseFloat(row.RAM_GB) || 0, disk: parseFloat(row.Disk_GB) || 0, ratioId: (rt || p.ratios[0]).id, storageId: (st || p.storage[0]).id, addons: [] };
     });
   })();
   pending = null;

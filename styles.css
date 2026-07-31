@@ -195,6 +195,11 @@ tbody tr:hover{background:var(--surface-2)}
 .vm-table .in, .vm-table select{min-width:6rem}
 .vm-table td:nth-child(2) .in{min-width:10rem}
 .vm-table td:nth-child(3) .in{min-width:12rem}
+.vm-table td:nth-child(4) .in{min-width:11rem}
+.res-table td.unassigned, .loc-table td.unassigned, #mapPreview td.unassigned{color:var(--text-faint);font-style:italic}
+.loc-table tbody td:first-child{font-family:var(--font-sans);white-space:nowrap}
+.res-table td.loc{max-width:11rem;overflow:hidden;text-overflow:ellipsis}
+.loc-table tfoot td{font-size:var(--text-xs)}
 .os-field{display:flex;align-items:center;gap:.35rem}
 .res-table td{font-family:var(--font-mono);font-variant-numeric:tabular-nums;white-space:nowrap}
 .res-table td.txt{font-family:var(--font-sans)}
@@ -234,6 +239,12 @@ tfoot td.label{font-family:var(--font-sans);text-transform:uppercase;letter-spac
 .bulk-bar{display:flex;flex-wrap:wrap;align-items:center;gap:var(--space-3);margin-bottom:var(--space-4);
   background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-md);padding:var(--space-3) var(--space-4)}
 .bulk-bar select{max-width:14rem}
+.bulk-bar #bulkLocation{max-width:16rem}
+.bulk-sep{width:1px;align-self:stretch;background:var(--border);margin:0 var(--space-1)}
+.filter-bar{margin-bottom:var(--space-5)}
+.inline-field{display:flex;align-items:center;gap:var(--space-2)}
+.inline-field > span{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--text-faint)}
+.inline-field select{max-width:22rem}
 
 /* ---------- empty states ---------- */
 .empty{padding:var(--space-12) var(--space-6);text-align:center;color:var(--text-muted)}
@@ -286,12 +297,15 @@ tfoot td.label{font-family:var(--font-sans);text-transform:uppercase;letter-spac
 
 @media (max-width:640px){
   .topbar{gap:var(--space-2)}
+  .bulk-sep{display:none}
+  .inline-field{flex-direction:column;align-items:flex-start;width:100%}
+  .inline-field select{width:100%;max-width:none}
   .brand-sub{display:none}
   main{padding-left:var(--space-3);padding-right:var(--space-3)}
   .grid-2{grid-template-columns:1fr}
 }
 @media print{
-  .topbar,.tabs,.head-btns,.foot,.toast-wrap,#tierRollup{display:none!important}
+  .topbar,.tabs,.head-btns,.foot,.toast-wrap,#tierRollup,#locFilterBar{display:none!important}
   body{background:#fff;color:#000}
   .card{box-shadow:none;border-color:#ccc}
 }
