@@ -35,6 +35,7 @@
   --success:#5ec98a;
   --shadow:0 1px 0 rgba(255,255,255,.03), 0 12px 32px rgba(0,0,0,.45);
   --grid-line:rgba(120,160,180,.055);
+  --stick-shadow:14px 0 16px -10px rgba(0,0,0,.95);
 }
 [data-theme='light']{
   --bg:#f4f6f8;
@@ -56,6 +57,7 @@
   --success:#2f7a4d;
   --shadow:0 1px 2px rgba(16,24,32,.06), 0 10px 24px rgba(16,24,32,.07);
   --grid-line:rgba(20,40,60,.045);
+  --stick-shadow:14px 0 16px -10px rgba(16,24,32,.34);
 }
 
 *{box-sizing:border-box}
@@ -226,6 +228,37 @@ tfoot td.label{font-family:var(--font-sans);text-transform:uppercase;letter-spac
 .addon-chip:has(input:checked){color:var(--primary);border-color:var(--primary-dim);background:var(--primary-soft)}
 .dash{color:var(--text-faint)}
 
+/* ---------- results table: resizable columns + frozen name column ---------- */
+.res-table.cols-fixed{table-layout:fixed}
+.res-table .spacer{padding:0;border-left:0}
+.res-table.cols-fixed th,.res-table.cols-fixed td{overflow:hidden;text-overflow:ellipsis}
+.res-table th{position:sticky;top:0}
+.res-table th .col-resizer{
+  position:absolute;top:0;right:0;bottom:0;width:11px;cursor:col-resize;
+  touch-action:none;z-index:3;background:transparent;
+}
+.res-table th .col-resizer::after{
+  content:'';position:absolute;top:18%;bottom:18%;right:4px;width:2px;border-radius:2px;
+  background:transparent;transition:background .12s ease;
+}
+.res-table th:hover .col-resizer::after{background:var(--border-strong)}
+.res-table th .col-resizer:hover::after,.res-table.resizing th .col-resizer::after{background:var(--primary)}
+.res-table.resizing{user-select:none}
+body.col-resizing{cursor:col-resize}
+body.col-resizing *{cursor:col-resize!important}
+
+/* frozen left columns (# and Name) */
+.res-table td.stick,.res-table th.stick{position:sticky;z-index:3}
+.res-table td.stick{background:var(--surface)}
+.res-table thead th.stick{z-index:6;background:var(--surface-2)}
+.res-table .stick-1{left:0}
+.res-table .stick-2{left:var(--stick-1w,40px)}
+.res-table tbody tr:hover td.stick{background:var(--surface-2)}
+.res-table tfoot td.stick{background:var(--surface-2);z-index:4}
+.res-table .stick-edge{border-right:1px solid var(--border)}
+.table-scroll.xscrolled .res-table .stick-edge{box-shadow:var(--stick-shadow)}
+.res-table td.stick.strong{color:var(--text)}
+
 /* ---------- summary cards ---------- */
 .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:var(--space-3);margin-bottom:var(--space-5)}
 .kpi{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-md);padding:var(--space-4);position:relative;overflow:hidden}
@@ -313,6 +346,10 @@ tfoot td.label{font-family:var(--font-sans);text-transform:uppercase;letter-spac
 }
 @media print{
   .topbar,.tabs,.head-btns,.foot,.toast-wrap,#tierRollup,#locFilterBar{display:none!important}
+  .res-table{table-layout:auto!important;width:100%!important}
+  .res-table col{width:auto!important}
+  .res-table .stick{position:static!important;box-shadow:none!important;background:transparent!important}
+  .col-resizer{display:none!important}
   body{background:#fff;color:#000}
   .card{box-shadow:none;border-color:#ccc}
 }

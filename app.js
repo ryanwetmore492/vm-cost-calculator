@@ -283,17 +283,19 @@ function bindCfg(tableSel) {
       P().addons = P().addons.filter(x => x.id !== id);
       VMS().forEach(v => v.addons = (v.addons || []).filter(a => a !== id));
     }
-    renderPricing(); renderVms(); renderResults(); save(true);
+    reconcileVmTiers();
+    renderPricing(); commit('pricing', { force: false });
   });
 }
 
 function afterPricingChange(structural) {
-  if (structural) renderVms();
-  renderResults(); save(true);
+  if (structural) reconcileVmTiers();
+  commit('pricing');
 }
 
 /* ================= RENDER: VM inventory ================= */
 function renderVms() {
+  reconcileVmTiers();
   const p = P(), vms = VMS();
   $('#vmCountPill').textContent = vms.length;
   renderClients();
@@ -372,9 +374,10 @@ function renderResults() {
   const val = r => ({ name: r.vm.name.toLowerCase(), os: String(r.vm.os).toLowerCase(), location: r.location.toLowerCase(), ram: r.ram, disk: r.disk, ratio: r.ratioLabel, storage: r.storageLabel, compute: r.compute, vmware: r.vmware, storageCost: r.storage, spla: r.spla, addons: r.addons, total: r.total }[key]);
   const sorted = rows.slice().sort((a, a2) => { const x = val(a), y = val(a2); return (typeof x === 'string' ? x.localeCompare(y) : x - y) * dir; });
 
-  $('#resTable tbody').innerHTML = sorted.map(r => `
+  $('#resTable tbody').innerHTML = sorted.map((r, i) => `
     <tr>
-      <td class="txt strong">${esc(r.vm.name || '(unnamed)')}</td>
+      <td class="w-idx mono stick stick-1">${i + 1}</td>
+      <td class="txt strong stick stick-2 stick-edge" title="${esc(r.vm.name || '(unnamed)')}">${esc(r.vm.name || '(unnamed)')}</td>
       <td class="txt"><span class="os-tag ${r.windows ? 'win' : /linux|ubuntu|centos|rhel|red hat|debian|suse/i.test(r.vm.os) ? 'lin' : ''}">${esc(r.vm.os || '—')}</span></td>
       <td class="txt loc${r.location === UNASSIGNED ? ' unassigned' : ''}" title="${esc(r.location)}">${esc(r.location)}</td>
       <td class="num">${num(r.ram)}</td>
@@ -387,15 +390,18 @@ function renderResults() {
       <td class="num${r.spla ? '' : ' zero'}">${usd(r.spla)}</td>
       <td class="num${r.addons ? '' : ' zero'}">${usd(r.addons)}</td>
       <td class="num total">${usd(r.total)}</td>
+      <td class="spacer"></td>
     </tr>`).join('');
 
   $('#resTable tfoot').innerHTML = `<tr>
-      <td class="label" colspan="3">${locFilter ? esc(locFilter) + ' subtotal' : 'Grand total'} — ${rows.length} VMs</td>
+      <td class="label stick stick-1 stick-edge" colspan="2">Total · ${rows.length} VMs</td>
+      <td class="label" colspan="2">${locFilter ? esc(locFilter) + ' subtotal' : 'Grand total'}</td>
       <td class="num">${num(T.ram)}</td><td class="num">${num(T.disk)}</td>
       <td colspan="2"></td>
       <td class="num">${usd(T.compute)}</td><td class="num">${usd(T.vmware)}</td><td class="num">${usd(T.storage)}</td>
       <td class="num">${usd(T.spla)}</td><td class="num">${usd(T.addons)}</td>
       <td class="num" style="color:var(--primary)">${usd(T.total)}</td>
+      <td class="spacer"></td>
     </tr>`;
 
   $$('#resTable th[data-sort]').forEach(th => {
@@ -408,6 +414,7 @@ function renderResults() {
 
   renderRollup(rows);
   renderLocationRollup(rows);
+  syncColW();
 }
 const locationsAll = rows => Array.from(new Set(rows.map(r => r.location))).sort(locSort);
 /* “Unassigned” always sorts last */
@@ -510,7 +517,162 @@ function renderClients() {
     .sort((a, b) => a.name.localeCompare(b.name))
     .map(c => `<option value="${c.id}" ${c.id === state.activeId ? 'selected' : ''}>${esc(c.name)} (${c.vms.length} VM${c.vms.length === 1 ? '' : 's'})</option>`).join('');
 }
-function renderAll() { renderPricing(); renderVms(); renderResults(); }
+function renderAll() { renderChrome(); renderPricing(); renderVms(); renderResults(); }
+
+/* ================= reactivity core =================
+   Single source of truth is `state`. Every tab re-renders from state when it
+   becomes visible, and every mutation refreshes the shared chrome plus any
+   currently visible view that did not originate the edit (so a focused input
+   is never blown away mid-typing). Result: no tab can ever show stale data. */
+const TABS = ['pricing', 'inventory', 'results'];
+const activeTab = () => { const t = $('.tab.active'); return t ? t.dataset.tab : 'pricing'; };
+function renderTab(name) {
+  if (name === 'pricing') renderPricing();
+  else if (name === 'inventory') renderVms();
+  else if (name === 'results') renderResults();
+}
+/* chrome = UI shared by every tab: client picker, inventory count badge, location autocomplete */
+function renderChrome() {
+  renderClients();
+  $('#vmCountPill').textContent = VMS().length;
+  syncLocationDatalist();
+}
+/* Called after any state mutation. `origin` is the tab the edit came from — it
+   already reflects the change in its own DOM, so it is not re-rendered unless
+   `force` is set (results has no text inputs, so it always re-renders). */
+function commit(origin, opts) {
+  const o = opts || {};
+  renderChrome();
+  const cur = activeTab();
+  if (cur !== origin || o.force || cur === 'results') renderTab(cur);
+  if (o.silent !== false) save(true);
+}
+/* Guard: a VM must never point at a tier that no longer exists. */
+function reconcileVmTiers() {
+  const p = P();
+  const dR = (p.ratios.find(r => r.isDefault) || p.ratios[0] || {}).id || '';
+  const dS = (p.storage.find(s => s.isDefault) || p.storage[0] || {}).id || '';
+  const okA = new Set(p.addons.map(a => a.id));
+  VMS().forEach(v => {
+    if (!p.ratios.some(r => r.id === v.ratioId)) v.ratioId = dR;
+    if (!p.storage.some(s => s.id === v.storageId)) v.storageId = dS;
+    v.addons = (v.addons || []).filter(a => okA.has(a));
+  });
+}
+
+/* ================= results table: resizable + frozen columns =================
+   Widths live in <col> elements (cheap, no per-cell writes) and persist per
+   client profile. The first two columns (# and Name) are position:sticky, so
+   the sticky offset of column 2 tracks the live width of column 1. */
+const COLW_MIN = i => (i === 0 ? 34 : i === 1 ? 120 : 56);
+const COLW_MAX = 720;
+let suppressSort = false;
+const resCols = () => $$('#resTable colgroup col:not(.spacer)');
+const resHeads = () => $$('#resTable thead th:not(.spacer)');
+function ui() { const c = active(); if (!c.ui || typeof c.ui !== 'object') c.ui = {}; return c.ui; }
+function savedColW() {
+  const w = ui().resColW;
+  return Array.isArray(w) && w.length === resCols().length && w.every(n => isFinite(n) && n > 0) ? w.slice() : null;
+}
+function applyColW(w) {
+  const t = $('#resTable');
+  resCols().forEach((c, i) => { c.style.width = w[i] + 'px'; });
+  t.classList.add('cols-fixed');
+  // width:100% + min-width:sum lets the trailing spacer column absorb any slack
+  t.style.width = '100%';
+  t.style.minWidth = w.reduce((a, n) => a + n, 0) + 'px';
+  t.style.setProperty('--stick-1w', w[0] + 'px');
+}
+/* Natural (content-driven) widths: drop the fixed layout, let the browser lay
+   the table out, then read each header cell back. */
+function measureColW() {
+  const t = $('#resTable');
+  const prevW = t.style.width, prevMin = t.style.minWidth;
+  t.classList.remove('cols-fixed');
+  t.style.width = ''; t.style.minWidth = '';
+  resCols().forEach(c => { c.style.width = ''; });
+  const w = resHeads().map((th, i) =>
+    Math.min(COLW_MAX, Math.max(COLW_MIN(i), Math.ceil(th.getBoundingClientRect().width) + 2)));
+  t.style.width = prevW; t.style.minWidth = prevMin;
+  return w;
+}
+function syncColW() {
+  const t = $('#resTable');
+  if (t.hidden || !t.offsetParent) return; // hidden tab measures as 0 — redone on activation
+  let w = savedColW();
+  if (!w) { w = measureColW(); ui().resColW = w; }
+  applyColW(w);
+}
+function resetColW(quiet) {
+  ui().resColW = null;
+  const t = $('#resTable');
+  if (t.hidden || !t.offsetParent) return;
+  const w = measureColW(); ui().resColW = w; applyColW(w); save(true);
+  if (!quiet) toast('Column widths auto-fitted to content.');
+}
+function autoFitCol(i) {
+  const cur = savedColW() || measureColW();
+  const nat = measureColW();
+  cur[i] = nat[i];
+  applyColW(cur); ui().resColW = cur; save(true);
+}
+function initColResize() {
+  const ths = resHeads();
+  ths.forEach((th, i) => {
+    const h = document.createElement('span');
+    h.className = 'col-resizer';
+    h.dataset.i = String(i);
+    h.setAttribute('role', 'separator');
+    h.setAttribute('aria-orientation', 'vertical');
+    h.title = 'Drag to resize · double-click to auto-fit';
+    th.appendChild(h);
+  });
+  let drag = null;
+  const head = $('#resTable thead');
+  head.addEventListener('pointerdown', e => {
+    const h = e.target.closest('.col-resizer'); if (!h) return;
+    e.preventDefault(); e.stopPropagation();
+    const i = Number(h.dataset.i);
+    const arr = savedColW() || measureColW();
+    drag = { i, x: e.clientX, w: arr[i], arr };
+    suppressSort = true;
+    $('#resTable').classList.add('resizing');
+    document.body.classList.add('col-resizing');
+    try { h.setPointerCapture(e.pointerId); } catch (err) { /* not fatal */ }
+  });
+  const move = e => {
+    if (!drag) return;
+    const w = Math.min(COLW_MAX, Math.max(COLW_MIN(drag.i), Math.round(drag.w + (e.clientX - drag.x))));
+    drag.arr[drag.i] = w;
+    applyColW(drag.arr);
+  };
+  const end = () => {
+    if (!drag) return;
+    ui().resColW = drag.arr.slice();
+    drag = null;
+    $('#resTable').classList.remove('resizing');
+    document.body.classList.remove('col-resizing');
+    save(true);
+    setTimeout(() => { suppressSort = false; }, 250); // let the trailing click pass without sorting
+  };
+  window.addEventListener('pointermove', move);
+  window.addEventListener('pointerup', end);
+  window.addEventListener('pointercancel', end);
+  head.addEventListener('dblclick', e => {
+    const h = e.target.closest('.col-resizer'); if (!h) return;
+    e.preventDefault(); e.stopPropagation();
+    suppressSort = true;
+    autoFitCol(Number(h.dataset.i));
+    setTimeout(() => { suppressSort = false; }, 250);
+  });
+  head.addEventListener('click', e => { if (e.target.closest('.col-resizer')) e.stopPropagation(); }, true);
+  // right-edge shadow only once the table is actually scrolled sideways
+  const wrap = $('#resTable').closest('.table-scroll');
+  const onScroll = () => wrap.classList.toggle('xscrolled', wrap.scrollLeft > 0);
+  wrap.addEventListener('scroll', onScroll, { passive: true });
+  onScroll();
+  window.addEventListener('resize', () => { if (!savedColW()) syncColW(); });
+}
 
 /* ================= CSV helpers ================= */
 function download(filename, text, mime) {
@@ -712,10 +874,13 @@ function exportResultsCsv() {
 function initEvents() {
   // tabs
   $$('.tab').forEach(t => t.addEventListener('click', () => {
-    $$('.tab').forEach(x => x.classList.remove('active'));
+    $$('.tab').forEach(x => { x.classList.remove('active'); x.setAttribute('aria-selected', 'false'); });
     t.classList.add('active');
-    ['pricing', 'inventory', 'results'].forEach(id => $('#tab-' + id).hidden = id !== t.dataset.tab);
-    if (t.dataset.tab === 'results') renderResults();
+    t.setAttribute('aria-selected', 'true');
+    TABS.forEach(id => $('#tab-' + id).hidden = id !== t.dataset.tab);
+    // always rebuild the tab being shown from state — nothing can be stale
+    renderChrome();
+    renderTab(t.dataset.tab);
   }));
   $('#btnGoInventory').addEventListener('click', () => $('.tab[data-tab="inventory"]').click());
   $$('[data-proxy]').forEach(b => b.addEventListener('click', () => $('#' + b.dataset.proxy).click()));
@@ -730,15 +895,15 @@ function initEvents() {
   ['#ratioTable', '#storageTable', '#addonTable'].forEach(bindCfg);
   $('#btnAddRatio').addEventListener('click', () => {
     P().ratios.push({ id: uid(), sku: '', label: '1:1', name: 'Enterprise Cloud Compute (1:1 Processor Ratio)', price: 0, isDefault: false });
-    renderPricing(); renderVms(); save(true);
+    renderPricing(); commit('pricing');
   });
   $('#btnAddStorage').addEventListener('click', () => {
     P().storage.push({ id: uid(), sku: '', name: 'New storage tier', price: 0, unit: 'TB', isDefault: false });
-    renderPricing(); renderVms(); save(true);
+    renderPricing(); commit('pricing');
   });
   $('#btnAddAddon').addEventListener('click', () => {
     P().addons.push({ id: uid(), sku: 'ADDON', name: 'New add-on', unit: 'per-vm', price: 0, defaultOn: false });
-    renderPricing(); renderVms(); renderResults(); save(true);
+    renderPricing(); commit('pricing');
   });
   $('#btnResetPricing').addEventListener('click', () => {
     if (!confirm('Reset all pricing, tiers and add-ons for this client to catalog defaults? VM inventory is kept (tiers reassigned to defaults).')) return;
@@ -770,7 +935,7 @@ function initEvents() {
       const was = isWin(vm.os); vm.os = e.target.value;
       if (was !== isWin(vm.os)) { renderVms(); const el = $(`tr[data-id="${vm.id}"] [data-f="os"]`, vmt); if (el) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); } }
     }
-    renderResults(); save(true);
+    commit('inventory');
   });
   vmt.addEventListener('change', e => {
     const tr = e.target.closest('tr[data-id]'); if (!tr) return;
@@ -783,46 +948,48 @@ function initEvents() {
       vm.addons = vm.addons || [];
       vm.addons = e.target.checked ? Array.from(new Set([...vm.addons, id])) : vm.addons.filter(a => a !== id);
     }
-    renderResults(); save(true);
+    commit('inventory');
   });
   vmt.addEventListener('click', e => {
     const tr = e.target.closest('tr[data-id]'); if (!tr) return;
     const i = VMS().findIndex(v => v.id === tr.dataset.id); if (i < 0) return;
-    if (e.target.closest('[data-del]')) { VMS().splice(i, 1); renderVms(); renderResults(); save(true); }
+    if (e.target.closest('[data-del]')) { VMS().splice(i, 1); renderVms(); commit('inventory'); }
     else if (e.target.closest('[data-dup]')) {
       const c = JSON.parse(JSON.stringify(VMS()[i])); c.id = uid(); c.name = c.name + '-copy';
-      VMS().splice(i + 1, 0, c); renderVms(); renderResults(); save(true);
+      VMS().splice(i + 1, 0, c); renderVms(); commit('inventory');
     }
   });
   $('#btnAddVm').addEventListener('click', () => {
-    VMS().push(blankVm(P())); renderVms(); renderResults(); save(true);
+    VMS().push(blankVm(P())); renderVms(); commit('inventory');
     const rows = $$('#vmTable tbody tr'); const last = rows[rows.length - 1];
     if (last) last.querySelector('[data-f="name"]').focus();
   });
   $('#btnClearVms').addEventListener('click', () => {
     if (!VMS().length) return;
     if (!confirm(`Delete all ${VMS().length} VMs from “${active().name}”? Pricing configuration is kept.`)) return;
-    active().vms = []; renderVms(); renderResults(); save(true);
+    active().vms = []; renderVms(); commit('inventory');
   });
-  $('#bulkRatio').addEventListener('change', e => { if (!e.target.value) return; VMS().forEach(v => v.ratioId = e.target.value); e.target.value = ''; renderVms(); renderResults(); save(true); toast('Ratio tier applied to all VMs.'); });
-  $('#bulkStorage').addEventListener('change', e => { if (!e.target.value) return; VMS().forEach(v => v.storageId = e.target.value); e.target.value = ''; renderVms(); renderResults(); save(true); toast('Storage tier applied to all VMs.'); });
+  $('#bulkRatio').addEventListener('change', e => { if (!e.target.value) return; VMS().forEach(v => v.ratioId = e.target.value); e.target.value = ''; renderVms(); commit('inventory'); toast('Ratio tier applied to all VMs.'); });
+  $('#bulkStorage').addEventListener('change', e => { if (!e.target.value) return; VMS().forEach(v => v.storageId = e.target.value); e.target.value = ''; renderVms(); commit('inventory'); toast('Storage tier applied to all VMs.'); });
   $('#btnBulkLocation').addEventListener('click', () => {
     const val = String($('#bulkLocation').value || '').trim();
     if (!VMS().length) return;
     if (!confirm(val ? `Set location “${val}” on all ${VMS().length} VMs?` : `Clear the location on all ${VMS().length} VMs (they become “${UNASSIGNED}”)?`)) return;
     VMS().forEach(v => v.location = val);
     $('#bulkLocation').value = '';
-    renderVms(); renderResults(); save(true);
+    renderVms(); commit('inventory');
     toast(val ? `Location “${val}” applied to all VMs.` : 'Location cleared on all VMs.');
   });
   $('#locFilter').addEventListener('change', e => { locFilter = e.target.value; renderResults(); });
 
   // results sorting / export
   $$('#resTable th[data-sort]').forEach(th => th.addEventListener('click', () => {
+    if (suppressSort) return; // a column resize drag just ended — don't sort
     if (sort.key === th.dataset.sort) sort.dir = sort.dir === 'asc' ? 'desc' : 'asc';
     else sort = { key: th.dataset.sort, dir: ['name', 'os', 'location', 'ratio', 'storage'].includes(th.dataset.sort) ? 'asc' : 'desc' };
     renderResults();
   }));
+  $('#btnResetCols').addEventListener('click', () => resetColW(false));
   $('#btnExportCsv').addEventListener('click', exportResultsCsv);
   $('#btnPrint').addEventListener('click', () => window.print());
 
@@ -856,7 +1023,7 @@ function initEvents() {
     if (!vms.length) return;
     if ($('#mapMode').value === 'replace') active().vms = vms; else active().vms = VMS().concat(vms);
     $('#mapModal').hidden = true; pending = null;
-    renderVms(); renderResults(); save(true);
+    renderVms(); commit('inventory');
     toast(`${vms.length} VM${vms.length === 1 ? '' : 's'} imported.`);
     $('.tab[data-tab="results"]').click();
   });
@@ -883,7 +1050,7 @@ function initEvents() {
     menu.hidden = true;
     if (act === 'rename') {
       const n = prompt('Client name:', active().name); if (n === null) return;
-      active().name = n.trim() || active().name; renderClients(); renderResults(); save(true);
+      active().name = n.trim() || active().name; commit(null);
     } else if (act === 'duplicate') {
       const c = JSON.parse(JSON.stringify(active())); c.id = uid(); c.name = active().name + ' (copy)';
       c.vms.forEach(v => v.id = uid());
@@ -944,6 +1111,7 @@ function initEvents() {
 /* ================= boot ================= */
 document.documentElement.dataset.theme = 'dark'; // dark-first: data-center aesthetic
 initEvents();
+initColResize();
 renderAll();
 $('#savedStamp').textContent = 'loaded ' + new Date().toLocaleTimeString();
 $('#storageInfo').textContent = STORE.persistent ? 'browser storage' : 'in-memory (preview frame — export JSON to keep your work)';
