@@ -15,6 +15,12 @@ A reusable, pure client-side web app for calculating monthly cost per VM in a VM
   - Custom add-ons priced per VM, per GB RAM, or per TB disk
   - Configurable GB→TB divisor (1024 or 1000)
 - **VM inventory** — manual entry or CSV import with a column-mapping step (auto-detects RVTools / Cloud Director headers, MB/GB/TB units, location columns, Zerto DR flag and DR storage columns), per-VM ratio tier, storage tier, data center location, **Zerto DR toggle with a manually entered DR storage (GB) value**, and add-ons
+- **CSV import modes** — every import ends in a mapping modal where you choose what happens to the existing inventory:
+  - **Replace inventory** — discard the current VM list and use the file
+  - **Append to inventory** — add the file's rows as new VMs
+  - **Merge / update existing VMs** — match rows to existing VMs by server name (case-insensitive, trimmed) and update **only the columns you mapped**. Everything else — including the fallback ratio tier, fallback storage tier and default location, which apply to newly added rows only — is left untouched. Requires the VM name column to be mapped. Rows with no matching VM can be **added as new VMs** or **skipped**; existing VMs absent from the file are never modified. Duplicate names in the CSV resolve to the last row (with a warning); duplicate names in the inventory are all updated. The preview tags each row `update` / `add new` / `skip` and shows `unchanged` for fields that will not be written, and an on-page summary reports how many VMs were updated, added and skipped plus the unmatched names.
+
+    Typical use: a client inventory already priced without DR, then a CSV with just `Name,Zerto,DR_Storage_GB` merged in — DR costs appear for the matched VMs and nothing else changes.
 - **Cost breakdown** — sortable per-VM table (including a DR $ column) with drag-resizable columns and a frozen server-name column, KPI summary cards, SKU roll-up, cost-by-location roll-up with location filter, CSV export
 - **Multi-client profiles** — save/load client environments (VM list + pricing) in browser localStorage, with JSON export/import for backup and sharing
 

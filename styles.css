@@ -326,6 +326,23 @@ body.col-resizing *{cursor:col-resize!important}
 .map-warn{font-size:var(--text-xs);color:var(--amber);border:1px solid color-mix(in oklab,var(--amber) 40%,transparent);
   background:color-mix(in oklab,var(--amber) 10%,transparent);padding:var(--space-3);border-radius:var(--radius-sm);line-height:1.6}
 .req{color:var(--primary)}
+#mapGrid.merge .field:not(:first-child) .req{display:none}
+
+/* ---------- merge-mode tags + import summary panel ---------- */
+#mapPreview .tag{display:inline-block;font-size:.6875rem;font-weight:700;letter-spacing:.04em;text-transform:uppercase;
+  padding:.1rem .4rem;border-radius:var(--radius-sm);border:1px solid currentColor;white-space:nowrap}
+.tag.upd{color:var(--blue)} .tag.new{color:var(--success)} .tag.skip{color:var(--text-faint)}
+.imp-summary{background:var(--surface-2);border:1px solid var(--border-strong);border-left:3px solid var(--primary);
+  border-radius:var(--radius-md);padding:var(--space-3) var(--space-4);margin-bottom:var(--space-4);font-size:var(--text-xs)}
+.imp-row{display:flex;align-items:center;gap:var(--space-3);flex-wrap:wrap}
+.imp-row strong{font-size:var(--text-sm)}
+.imp-stat{display:inline-flex;gap:.3rem;align-items:baseline;color:var(--text-muted);
+  border:1px solid var(--border);border-radius:999px;padding:.1rem .55rem}
+.imp-stat b{font-family:var(--font-mono);color:var(--text)}
+.imp-stat.upd b{color:var(--blue)} .imp-stat.new b{color:var(--success)} .imp-stat.skip b{color:var(--text-faint)}
+.imp-x{margin-left:auto}
+.imp-notes{margin:var(--space-2) 0 0;padding-left:1.1rem;color:var(--text-muted);line-height:1.65}
+
 
 /* ---------- toasts ---------- */
 .toast-wrap{position:fixed;bottom:var(--space-5);right:var(--space-5);display:flex;flex-direction:column;gap:var(--space-2);z-index:80}
@@ -341,6 +358,8 @@ body.col-resizing *{cursor:col-resize!important}
   border-top:1px solid var(--border);margin-top:var(--space-8)}
 
 @media (max-width:640px){
+  .imp-row{align-items:flex-start}
+  .imp-x{margin-left:0}
   .topbar{gap:var(--space-2)}
   .bulk-sep{display:none}
   .inline-field{flex-direction:column;align-items:flex-start;width:100%}
@@ -353,7 +372,7 @@ body.col-resizing *{cursor:col-resize!important}
   .rate-echo{display:none}
 }
 @media print{
-  .topbar,.tabs,.head-btns,.foot,.toast-wrap,#tierRollup,#locFilterBar{display:none!important}
+  .topbar,.tabs,.head-btns,.foot,.toast-wrap,#tierRollup,#locFilterBar,#impSummary{display:none!important}
   .res-table{table-layout:auto!important;width:100%!important}
   .res-table col{width:auto!important}
   .res-table .stick{position:static!important;box-shadow:none!important;background:transparent!important}

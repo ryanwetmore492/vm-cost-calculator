@@ -339,6 +339,7 @@ function afterPricingChange(structural) {
 /* ================= RENDER: VM inventory ================= */
 function renderVms() {
   reconcileVmTiers();
+  renderImportSummary();
   const p = P(), vms = VMS();
   $('#vmCountPill').textContent = vms.length;
   renderClients();
@@ -763,7 +764,9 @@ const FIELDS = [
   { key: 'name', label: 'VM name', req: true, hints: ['name', 'vm', 'vm name', 'vmname', 'virtual machine', 'hostname', 'server'] },
   { key: 'os', label: 'Operating system', req: false, hints: ['os', 'os according to the configuration file', 'guest os', 'guest', 'operating system', 'os according to the vmware tools'] },
   { key: 'ram', label: 'RAM', req: true, hints: ['ram', 'ram_gb', 'ram gb', 'memory', 'memory mb', 'memory (gb)', 'memory size', 'mem'] },
-  { key: 'disk', label: 'Provisioned disk', req: true, hints: ['disk', 'disk_gb', 'disk gb', 'provisioned', 'provisioned mb', 'provisioned mib', 'storage', 'total disk capacity', 'capacity', 'in use mb', 'allocated'] },
+  { key: 'disk', label: 'Provisioned disk', req: true, hints: ['disk', 'disk_gb', 'disk gb', 'provisioned', 'provisioned mb', 'provisioned mib', 'storage', 'total disk capacity', 'capacity', 'in use mb', 'allocated'],
+    /* a DR/replication size column is not the provisioned-disk column */
+    avoid: /\b(dr|zerto|journal|replica|draas)\b|disaster recovery|replication/ },
   { key: 'location', label: 'Location (optional)', req: false, hints: ['location', 'site', 'datacenter', 'data center', 'dc', 'data centre', 'facility', 'region', 'site name', 'dc name', 'location name'] },
   { key: 'drFlag', label: 'Zerto DR protected (optional)', req: false, hints: ['zerto', 'dr', 'dr protected', 'dr flag', 'disaster recovery', 'replicated', 'replication', 'protected', 'zerto protected', 'zerto dr', 'draas'],
     /* never grab a size column (“DR Storage GB”, “Journal MB”…) as the on/off flag */
@@ -839,6 +842,7 @@ function openMapper(file, parsed) {
   syncLocationDatalist();
   $('#mapLocation').value = '';
   $('#mapMode').value = VMS().length ? 'append' : 'replace';
+  $('#mapUnmatched').value = 'add';
   $('#mapModal').hidden = false;
   refreshPreview();
 }
@@ -846,33 +850,47 @@ function readMap() {
   const m = {}; $$('#mapGrid select').forEach(s => { if (s.value) m[s.dataset.map] = s.value; });
   return m;
 }
+/* ---------------- CSV import: mode helpers ---------------- */
+/* Import modes: replace · append · merge (update existing VMs matched by name). */
+function importMode() { const el = $('#mapMode'); return el ? el.value : 'append'; }
+function unmatchedAction() { const el = $('#mapUnmatched'); return el ? el.value : 'add'; }
+/* Merge matching is case-insensitive and whitespace-trimmed. */
+const nameKey = s => String(s ?? '').trim().toLowerCase();
+
+/* Builds one entry per CSV row:
+   `full`  = a complete new VM (used by replace/append and by merge's "add unmatched")
+   `patch` = ONLY the fields actually mapped in the modal (used by merge, so unmapped
+             fields — and the fallback tier/location selectors — never clobber existing data). */
 function buildImport() {
-  const m = readMap(), p = P();
+  const m = readMap(), p = P(), mode = importMode();
   const dScale = { GB: 1, MB: 1 / 1024, TB: 1024 }[$('#mapDiskUnit').value];
   const rScale = { GB: 1, MB: 1 / 1024 }[$('#mapRamUnit').value];
   const drScale = { GB: 1, MB: 1 / 1024, TB: 1024 }[$('#mapDrUnit').value];
   const fbR = $('#mapRatio').value, fbS = $('#mapStorage').value;
   const fbLoc = String($('#mapLocation').value || '').trim();
   const warns = [];
-  const vms = [];
+  const vms = [], entries = [];
   pending.rows.forEach((row, i) => {
     const name = m.name ? String(row[m.name] ?? '').trim() : '';
     const ramRaw = m.ram ? parseFloat(String(row[m.ram]).replace(/[^0-9.\-]/g, '')) : NaN;
     const diskRaw = m.disk ? parseFloat(String(row[m.disk]).replace(/[^0-9.\-]/g, '')) : NaN;
-    if (!name && !isFinite(ramRaw) && !isFinite(diskRaw)) return; // blank row
-    if (!name) warns.push(`Row ${i + 2}: missing name — imported as “(unnamed)”.`);
-    if (!isFinite(ramRaw)) warns.push(`Row ${i + 2}: RAM not numeric — set to 0.`);
-    if (!isFinite(diskRaw)) warns.push(`Row ${i + 2}: disk not numeric — set to 0.`);
     const drGbRaw = m.drGb ? parseFloat(String(row[m.drGb]).replace(/[^0-9.\-]/g, '')) : NaN;
+    if (!name && !isFinite(ramRaw) && !isFinite(diskRaw)) return; // blank row
+    if (!name) warns.push(mode === 'merge'
+      ? `Row ${i + 2}: missing name — cannot be matched, skipped.`
+      : `Row ${i + 2}: missing name — imported as “(unnamed)”.`);
+    if (m.ram && !isFinite(ramRaw)) warns.push(`Row ${i + 2}: RAM not numeric — set to 0.`);
+    if (m.disk && !isFinite(diskRaw)) warns.push(`Row ${i + 2}: disk not numeric — set to 0.`);
     const drGb = r2((isFinite(drGbRaw) ? drGbRaw : 0) * drScale);
     // If only the GB column is mapped, a positive DR footprint implies the VM is protected.
     const drOn = m.drFlag ? parseDrFlag(row[m.drFlag]) : (m.drGb ? drGb > 0 : false);
     if (m.drFlag && drOn && m.drGb && !(drGb > 0)) warns.push(`Row ${i + 2}: Zerto DR flagged on but no DR storage GB — only the flat fee will apply.`);
     const rt = m.ratio ? matchTier(p.ratios, row[m.ratio], ['label', 'name', 'sku']) : null;
     const st = m.storage ? matchTier(p.storage, row[m.storage], ['name', 'sku']) : null;
-    if (m.ratio && !rt && String(row[m.ratio] || '').trim()) warns.push(`Row ${i + 2}: ratio “${row[m.ratio]}” not recognised — using fallback tier.`);
-    if (m.storage && !st && String(row[m.storage] || '').trim()) warns.push(`Row ${i + 2}: storage tier “${row[m.storage]}” not recognised — using fallback tier.`);
-    vms.push({
+    if (m.ratio && !rt && String(row[m.ratio] || '').trim()) warns.push(`Row ${i + 2}: ratio “${row[m.ratio]}” not recognised — ${mode === 'merge' ? 'tier left unchanged' : 'using fallback tier'}.`);
+    if (m.storage && !st && String(row[m.storage] || '').trim()) warns.push(`Row ${i + 2}: storage tier “${row[m.storage]}” not recognised — ${mode === 'merge' ? 'tier left unchanged' : 'using fallback tier'}.`);
+
+    const full = {
       id: uid(),
       name: name || '(unnamed)',
       os: m.os ? String(row[m.os] ?? '').trim() : '',
@@ -884,31 +902,161 @@ function buildImport() {
       ratioId: rt ? rt.id : fbR,
       storageId: st ? st.id : fbS,
       addons: p.addons.filter(a => a.defaultOn).map(a => a.id)
-    });
+    };
+
+    /* patch: mapped fields only. Blank cells in a mapped column are treated as
+       "no data for this row" and are skipped, except the DR flag (an explicit
+       "no"/blank flag legitimately means unprotected). */
+    const patch = {};
+    if (m.os && String(row[m.os] ?? '').trim() !== '') patch.os = String(row[m.os]).trim();
+    if (m.location && String(row[m.location] ?? '').trim() !== '') patch.location = String(row[m.location]).trim();
+    if (m.ram && isFinite(ramRaw)) patch.ram = r2(ramRaw * rScale);
+    if (m.disk && isFinite(diskRaw)) patch.disk = r2(diskRaw * dScale);
+    if (m.drFlag) { patch.dr = drOn; patch.drGb = drOn ? (m.drGb ? drGb : undefined) : 0; if (patch.drGb === undefined) delete patch.drGb; }
+    else if (m.drGb && isFinite(drGbRaw)) { patch.dr = drOn; patch.drGb = drOn ? drGb : 0; }
+    if (rt) patch.ratioId = rt.id;
+    if (st) patch.storageId = st.id;
+
+    vms.push(full);
+    entries.push({ row: i + 2, name, full, patch, fields: Object.keys(patch) });
   });
-  return { vms, warns, missing: FIELDS.filter(f => f.req && !m[f.key]).map(f => f.label) };
+  const missing = mode === 'merge'
+    ? (m.name ? [] : ['VM name'])
+    : FIELDS.filter(f => f.req && !m[f.key]).map(f => f.label);
+  return { vms, entries, warns, missing, mode, map: m };
 }
+
+/* Plans a merge without mutating state — used for both the preview and the commit. */
+function planMerge(entries, action) {
+  const inv = VMS();
+  const idx = new Map();
+  inv.forEach(v => { const k = nameKey(v.name); if (!idx.has(k)) idx.set(k, []); idx.get(k).push(v); });
+  const dupCsv = [], noName = [];
+  const last = new Map(); // CSV duplicates: last row wins
+  entries.forEach(e => {
+    if (!e.name) { noName.push(e.row); return; }
+    const k = nameKey(e.name);
+    if (last.has(k)) dupCsv.push(e.name);
+    last.set(k, e);
+  });
+  const updates = [], adds = [], unmatched = [], dupInv = [];
+  last.forEach((e, k) => {
+    const targets = idx.get(k) || [];
+    if (targets.length) {
+      if (targets.length > 1) dupInv.push({ name: targets[0].name, n: targets.length });
+      updates.push({ entry: e, targets });
+    } else {
+      unmatched.push(e.name);
+      if (action === 'add') adds.push(e);
+    }
+  });
+  return {
+    updates, adds, unmatched, dupCsv, dupInv, noName,
+    matchedRows: updates.length,
+    updatedVms: updates.reduce((a, u) => a + u.targets.length, 0),
+    added: adds.length,
+    skipped: (action === 'add' ? 0 : unmatched.length) + noName.length
+  };
+}
+/* Keeps the mode selector honest: merge needs a mapped Name column and existing VMs. */
+function syncModeUi(mapped) {
+  const sel = $('#mapMode'), opt = $('#mapModeMerge');
+  if (!sel || !opt) return importMode();
+  const nameOk = !!mapped.name, hasVms = VMS().length > 0;
+  const why = !hasVms ? ' (no existing VMs)' : (!nameOk ? ' (map VM name first)' : '');
+  opt.textContent = 'Merge / update existing VMs' + why;
+  opt.disabled = !nameOk || !hasVms;
+  if (opt.disabled && sel.value === 'merge') sel.value = hasVms ? 'append' : 'replace';
+  const uf = $('#mapUnmatchedField');
+  if (uf) uf.hidden = sel.value !== 'merge';
+  /* in merge mode only the name column is required — hide the other required markers */
+  $('#mapGrid').classList.toggle('merge', sel.value === 'merge');
+  return sel.value;
+}
+
 function refreshPreview() {
-  const { vms, warns, missing } = buildImport();
-  const head = ['Name', 'OS', 'Location', 'RAM GB', 'Disk GB', 'Zerto DR', 'DR GB', 'Ratio', 'Storage tier'];
+  const built = buildImport();
+  const mode = syncModeUi(built.map);
+  /* selector may have flipped out of merge — rebuild so patches/warnings match the mode */
+  const b = (mode === built.mode) ? built : buildImport();
+  const ent = b.entries, miss = b.missing, wrn = b.warns.slice();
+  const merge = mode === 'merge';
+  const plan = merge ? planMerge(ent, unmatchedAction()) : null;
+
+  const unchanged = '<span class="dash" title="left unchanged">unchanged</span>';
+  /* rows that will be inserted as new VMs show their real (defaulted) values;
+     rows that update an existing VM show “unchanged” for every unmapped field */
+  const isAdd = e => !!plan && plan.adds.includes(e);
+  const cell = (e, field, html) => (merge && !isAdd(e) && !e.fields.includes(field)) ? unchanged : html;
+  const head = (merge ? ['Action'] : []).concat(['Name', 'OS', 'Location', 'RAM GB', 'Disk GB', 'Zerto DR', 'DR GB', 'Ratio', 'Storage tier']);
+  const action = e => {
+    if (!e.name) return '<span class="tag skip">skip</span>';
+    const hit = (plan.updates.find(u => nameKey(u.entry.name) === nameKey(e.name)) || {});
+    if (hit.targets && hit.entry === e) return `<span class="tag upd">update${hit.targets.length > 1 ? ' ×' + hit.targets.length : ''}</span>`;
+    if (hit.targets) return '<span class="tag skip">superseded</span>';
+    if (plan.adds.includes(e)) return '<span class="tag new">add new</span>';
+    const dup = plan.dupCsv.length && ent.some(o => o !== e && nameKey(o.name) === nameKey(e.name) && ent.indexOf(o) > ent.indexOf(e));
+    return dup ? '<span class="tag skip">superseded</span>' : '<span class="tag skip">skip</span>';
+  };
+  const rows = ent.slice(0, 8).map(e => {
+    const v = e.full;
+    return `<tr>${merge ? `<td>${action(e)}</td>` : ''}
+      <td>${esc(v.name)}</td>
+      <td>${cell(e, 'os', esc(v.os) || '<span class="dash">—</span>')}</td>
+      <td class="${!merge && !v.location ? 'unassigned' : ''}">${cell(e, 'location', v.location ? esc(v.location) : `<span class="unassigned">${UNASSIGNED}</span>`)}</td>
+      <td class="num mono">${cell(e, 'ram', num(v.ram))}</td>
+      <td class="num mono">${cell(e, 'disk', num(v.disk))}</td>
+      <td class="${v.dr ? 'mono' : 'unassigned'}">${cell(e, 'dr', v.dr ? 'yes' : 'no')}</td>
+      <td class="num mono">${cell(e, 'drGb', v.dr ? num(v.drGb) : '<span class="dash">—</span>')}</td>
+      <td>${cell(e, 'ratioId', esc((P().ratios.find(r => r.id === v.ratioId) || {}).label || '—'))}</td>
+      <td>${cell(e, 'storageId', esc(shortTier((P().storage.find(s => s.id === v.storageId) || {}).name || '—')))}</td></tr>`;
+  }).join('');
   $('#mapPreview thead').innerHTML = `<tr>${head.map(h => `<th>${h}</th>`).join('')}</tr>`;
-  $('#mapPreview tbody').innerHTML = vms.slice(0, 8).map(v => `<tr>
-      <td>${esc(v.name)}</td><td>${esc(v.os) || '<span class="dash">—</span>'}</td>
-      <td class="${v.location ? '' : 'unassigned'}">${esc(v.location || UNASSIGNED)}</td>
-      <td class="num mono">${num(v.ram)}</td><td class="num mono">${num(v.disk)}</td>
-      <td class="${v.dr ? 'mono' : 'unassigned'}">${v.dr ? 'yes' : 'no'}</td>
-      <td class="num mono">${v.dr ? num(v.drGb) : '<span class="dash">—</span>'}</td>
-      <td>${esc((P().ratios.find(r => r.id === v.ratioId) || {}).label || '—')}</td>
-      <td>${esc(shortTier((P().storage.find(s => s.id === v.storageId) || {}).name || '—'))}</td></tr>`).join('')
-    || '<tr><td colspan="9" class="muted">No importable rows with the current mapping.</td></tr>';
-  $('#mapPrevInfo').textContent = `${vms.length} row(s) ready · showing first ${Math.min(8, vms.length)}`;
+  $('#mapPreview tbody').innerHTML = rows || `<tr><td colspan="${head.length}" class="muted">No importable rows with the current mapping.</td></tr>`;
+  $('#mapPrevInfo').textContent = merge
+    ? `${ent.length} row(s) · ${plan.updatedVms} VM${plan.updatedVms === 1 ? '' : 's'} to update · ${plan.added} to add · ${plan.skipped} skipped · showing first ${Math.min(8, ent.length)}`
+    : `${ent.length} row(s) ready · showing first ${Math.min(8, ent.length)}`;
+
   const msgs = [];
-  if (missing.length) msgs.push(`<strong>Required column${missing.length > 1 ? 's' : ''} not mapped:</strong> ${missing.join(', ')}.`);
-  if (warns.length) msgs.push(`<strong>${warns.length} row note${warns.length > 1 ? 's' : ''}:</strong><br>` + warns.slice(0, 6).map(esc).join('<br>') + (warns.length > 6 ? `<br>…and ${warns.length - 6} more.` : ''));
+  if (miss.length) msgs.push(`<strong>Required column${miss.length > 1 ? 's' : ''} not mapped:</strong> ${miss.join(', ')}.`);
+  if (merge) {
+    const fields = ent.length ? Array.from(new Set([].concat(...ent.map(e => e.fields)))) : [];
+    msgs.push(`<strong>Merge mode:</strong> matches existing VMs by name (case-insensitive). Only mapped fields are written — ${fields.length ? '<span class="mono">' + fields.map(esc).join(', ') + '</span>' : 'nothing yet'}. Fallback tiers and the default location apply to newly added rows only.`);
+    if (plan.dupCsv.length) msgs.push(`<strong>Duplicate name${plan.dupCsv.length > 1 ? 's' : ''} in CSV:</strong> ${plan.dupCsv.slice(0, 5).map(esc).join(', ')}${plan.dupCsv.length > 5 ? ` …+${plan.dupCsv.length - 5}` : ''} — the last row for each name wins.`);
+    if (plan.dupInv.length) msgs.push(`<strong>Duplicate name${plan.dupInv.length > 1 ? 's' : ''} in inventory:</strong> ${plan.dupInv.slice(0, 5).map(d => esc(d.name) + ' ×' + d.n).join(', ')} — every match will be updated.`);
+    if (plan.unmatched.length) msgs.push(`<strong>${plan.unmatched.length} row${plan.unmatched.length > 1 ? 's' : ''} with no matching VM:</strong> ${plan.unmatched.slice(0, 5).map(esc).join(', ')}${plan.unmatched.length > 5 ? ` …+${plan.unmatched.length - 5}` : ''} — will be ${unmatchedAction() === 'add' ? 'added as new VMs' : 'skipped'}.`);
+  }
+  if (wrn.length) msgs.push(`<strong>${wrn.length} row note${wrn.length > 1 ? 's' : ''}:</strong><br>` + wrn.slice(0, 6).map(esc).join('<br>') + (wrn.length > 6 ? `<br>…and ${wrn.length - 6} more.` : ''));
   $('#mapWarn').innerHTML = msgs.join('<br><br>');
   $('#mapWarn').hidden = msgs.length === 0;
-  $('#btnConfirmImport').disabled = missing.length > 0 || vms.length === 0;
-  $('#btnConfirmImport').textContent = vms.length ? `Import ${vms.length} VM${vms.length === 1 ? '' : 's'}` : 'Import VMs';
+
+  const nothingToDo = merge ? (plan.updatedVms + plan.added === 0) : ent.length === 0;
+  $('#btnConfirmImport').disabled = miss.length > 0 || nothingToDo;
+  $('#btnConfirmImport').textContent = merge
+    ? (nothingToDo ? 'Merge VMs' : `Merge ${plan.updatedVms} update${plan.updatedVms === 1 ? '' : 's'}${plan.added ? ' + ' + plan.added + ' new' : ''}`)
+    : (ent.length ? `Import ${ent.length} VM${ent.length === 1 ? '' : 's'}` : 'Import VMs');
+}
+
+/* ---------------- import result summary panel (inventory tab) ---------------- */
+let importSummary = null;
+function renderImportSummary() {
+  const box = $('#impSummary');
+  if (!box) return;
+  if (!importSummary) { box.hidden = true; box.innerHTML = ''; return; }
+  const s = importSummary;
+  const stat = (n, label, cls) => `<span class="imp-stat ${cls}"><b>${n}</b> ${label}</span>`;
+  const notes = [];
+  if (s.unmatched && s.unmatched.length) notes.push(`No inventory match for ${s.unmatched.slice(0, 5).map(esc).join(', ')}${s.unmatched.length > 5 ? ` …and ${s.unmatched.length - 5} more` : ''} — ${s.action === 'add' ? 'added as new VMs' : 'skipped'}.`);
+  if (s.dupCsv && s.dupCsv.length) notes.push(`CSV had duplicate name${s.dupCsv.length > 1 ? 's' : ''} (${s.dupCsv.slice(0, 5).map(esc).join(', ')}) — last row won.`);
+  if (s.dupInv && s.dupInv.length) notes.push(`Inventory has duplicate name${s.dupInv.length > 1 ? 's' : ''} (${s.dupInv.map(d => esc(d.name) + ' ×' + d.n).join(', ')}) — all matches were updated.`);
+  if (s.noName) notes.push(`${s.noName} row${s.noName > 1 ? 's' : ''} had no name and could not be matched.`);
+  if (s.fields && s.fields.length) notes.push(`Fields written: <span class="mono">${s.fields.map(esc).join(', ')}</span>. All other fields left untouched.`);
+  box.innerHTML = `<div class="imp-row">
+      <strong>${esc(s.title)}</strong>
+      ${stat(s.updated, 'updated', 'upd')}${stat(s.added, 'added', 'new')}${stat(s.skipped, 'skipped', 'skip')}
+      <button class="btn icon imp-x" id="impDismiss" aria-label="Dismiss import summary">✕</button>
+    </div>${notes.length ? `<ul class="imp-notes">${notes.map(n => `<li>${n}</li>`).join('')}</ul>` : ''}`;
+  box.hidden = false;
 }
 
 function exportResultsCsv() {
@@ -1148,18 +1296,46 @@ function initEvents() {
     if (e.target.dataset.map === 'drGb') $('#mapDrUnit').value = guessUnit(e.target.value, 'disk');
     refreshPreview();
   });
-  ['#mapDiskUnit', '#mapRamUnit', '#mapDrUnit', '#mapRatio', '#mapStorage', '#mapLocation'].forEach(s => $(s).addEventListener('change', refreshPreview));
+  ['#mapDiskUnit', '#mapRamUnit', '#mapDrUnit', '#mapRatio', '#mapStorage', '#mapLocation', '#mapMode', '#mapUnmatched'].forEach(s => $(s).addEventListener('change', refreshPreview));
   $('#mapLocation').addEventListener('input', refreshPreview);
   $$('#mapModal [data-close]').forEach(b => b.addEventListener('click', () => { $('#mapModal').hidden = true; pending = null; }));
   $('#mapModal').addEventListener('click', e => { if (e.target.id === 'mapModal') { $('#mapModal').hidden = true; pending = null; } });
   $('#btnConfirmImport').addEventListener('click', () => {
-    const { vms } = buildImport();
+    const { vms, entries, mode, map: m } = buildImport();
+    if (mode === 'merge') {
+      if (!m.name) return toast('Map the VM name column to merge.', true);
+      const action = unmatchedAction();
+      const plan = planMerge(entries, action);
+      if (!plan.updatedVms && !plan.added) return toast('Nothing to merge with the current mapping.', true);
+      // update matched VMs in place — only the mapped fields are written
+      plan.updates.forEach(u => u.targets.forEach(v => Object.assign(v, u.entry.patch)));
+      if (plan.adds.length) active().vms = VMS().concat(plan.adds.map(e => e.full));
+      const fields = Array.from(new Set([].concat(...plan.updates.map(u => u.entry.fields))));
+      importSummary = {
+        title: 'CSV merge complete', action,
+        updated: plan.updatedVms, added: plan.added, skipped: plan.skipped,
+        unmatched: plan.unmatched, dupCsv: plan.dupCsv, dupInv: plan.dupInv,
+        noName: plan.noName.length, fields
+      };
+      $('#mapModal').hidden = true; pending = null;
+      renderVms(); commit('inventory');
+      toast(`Merge: ${plan.updatedVms} VM${plan.updatedVms === 1 ? '' : 's'} updated, ${plan.added} added, ${plan.skipped} skipped.`);
+      $('.tab[data-tab="results"]').click();
+      return;
+    }
     if (!vms.length) return;
-    if ($('#mapMode').value === 'replace') active().vms = vms; else active().vms = VMS().concat(vms);
+    if (mode === 'replace') active().vms = vms; else active().vms = VMS().concat(vms);
+    importSummary = {
+      title: mode === 'replace' ? 'Inventory replaced from CSV' : 'CSV appended to inventory',
+      action: 'add', updated: 0, added: vms.length, skipped: 0, unmatched: [], dupCsv: [], dupInv: [], noName: 0, fields: []
+    };
     $('#mapModal').hidden = true; pending = null;
     renderVms(); commit('inventory');
     toast(`${vms.length} VM${vms.length === 1 ? '' : 's'} imported.`);
     $('.tab[data-tab="results"]').click();
+  });
+  $('#impSummary').addEventListener('click', e => {
+    if (e.target.id === 'impDismiss') { importSummary = null; renderImportSummary(); }
   });
 
   // clients
