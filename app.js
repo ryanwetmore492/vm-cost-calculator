@@ -841,7 +841,10 @@ function openMapper(file, parsed) {
   $('#mapStorage').innerHTML = p.storage.map(s => `<option value="${s.id}" ${s.isDefault ? 'selected' : ''}>${esc(shortTier(s.name))} — ${esc(rateStr(s))}</option>`).join('');
   syncLocationDatalist();
   $('#mapLocation').value = '';
-  $('#mapMode').value = VMS().length ? 'append' : 'replace';
+  /* Smart default: enrichment files (name mapped, no RAM/disk columns) against an
+     existing inventory almost always mean "merge", not append. */
+  const enrichment = VMS().length && pending.map.name && !pending.map.ram && !pending.map.disk;
+  $('#mapMode').value = enrichment ? 'merge' : (VMS().length ? 'append' : 'replace');
   $('#mapUnmatched').value = 'add';
   $('#mapModal').hidden = false;
   refreshPreview();
@@ -1018,7 +1021,11 @@ function refreshPreview() {
     : `${ent.length} row(s) ready · showing first ${Math.min(8, ent.length)}`;
 
   const msgs = [];
-  if (miss.length) msgs.push(`<strong>Required column${miss.length > 1 ? 's' : ''} not mapped:</strong> ${miss.join(', ')}.`);
+  if (miss.length) {
+    msgs.push(`<strong>Required column${miss.length > 1 ? 's' : ''} not mapped:</strong> ${miss.join(', ')} — the Import button is disabled until ${miss.length > 1 ? 'these are' : 'this is'} mapped.`);
+    if (!merge && b.map.name && VMS().length)
+      msgs.push(`<strong>Tip:</strong> only enriching existing VMs (e.g. adding Zerto DR data)? Switch <em>Existing VMs</em> to <strong>Merge / update existing VMs</strong> — merge matches by server name, needs only the VM name column, and writes only the columns you mapped.`);
+  }
   if (merge) {
     const fields = ent.length ? Array.from(new Set([].concat(...ent.map(e => e.fields)))) : [];
     msgs.push(`<strong>Merge mode:</strong> matches existing VMs by name (case-insensitive). Only mapped fields are written — ${fields.length ? '<span class="mono">' + fields.map(esc).join(', ') + '</span>' : 'nothing yet'}. Fallback tiers and the default location apply to newly added rows only.`);
