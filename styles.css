@@ -207,6 +207,13 @@ tbody tr:hover{background:var(--surface-2)}
 .loc-table tbody td:first-child{font-family:var(--font-sans);white-space:nowrap}
 .res-table td.loc{max-width:11rem;overflow:hidden;text-overflow:ellipsis}
 .loc-table tfoot td{font-size:var(--text-xs)}
+/* Zerto DR column in the inventory table */
+.vm-table th.w-dr{width:5.5rem;text-align:center}
+.vm-table td.dr-cell{text-align:center}
+.vm-table td.dr-cell .switch{margin:0 auto}
+.vm-table .in[data-f="drGb"]{min-width:5rem;max-width:7rem}
+#drTable td:nth-child(2) .in{min-width:18rem}
+#drTable .rate-echo{margin-top:.1rem}
 .os-field{display:flex;align-items:center;gap:.35rem}
 .res-table td{font-family:var(--font-mono);font-variant-numeric:tabular-nums;white-space:nowrap}
 .res-table td.txt{font-family:var(--font-sans)}
@@ -342,6 +349,7 @@ body.col-resizing *{cursor:col-resize!important}
   main{padding-left:var(--space-3);padding-right:var(--space-3)}
   .grid-2{grid-template-columns:1fr}
   #storageTable select.unit-sel{min-width:5.5rem}
+  .vm-table th.w-dr{width:4.5rem}
   .rate-echo{display:none}
 }
 @media print{

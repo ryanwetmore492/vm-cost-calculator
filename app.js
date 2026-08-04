@@ -36,6 +36,10 @@ function defaultPricing() {
       { id: uid(), sku: '3819', name: 'Enterprise Cloud Storage — Standard Flash', price: 333.00, unit: 'TB', isDefault: true },
       { id: uid(), sku: '3815', name: 'Enterprise Cloud Storage — High Performance Flash', price: 359.00, unit: 'TB', isDefault: false }
     ],
+    dr: {
+      storage: { sku: '', name: 'DR Storage — Zerto Replication', price: 0.15 },
+      fee: { sku: '', name: 'Zerto Replication Fee', price: 25.00 }
+    },
     vmwareLic: { sku: '2729', name: 'VMware Licensing', price: 10.00, enabled: true },
     spla: { sku: '2589', name: 'Microsoft Windows Server Licensing (SPLA)', price: 99.00 },
     addons: [],
@@ -48,7 +52,7 @@ function newClient(name, pricing) {
 function blankVm(pricing) {
   const dr = (pricing.ratios.find(r => r.isDefault) || pricing.ratios[0] || {}).id || '';
   const ds = (pricing.storage.find(s => s.isDefault) || pricing.storage[0] || {}).id || '';
-  return { id: uid(), name: '', os: 'Linux', location: '', ram: 0, disk: 0, ratioId: dr, storageId: ds, addons: pricing.addons.filter(a => a.defaultOn).map(a => a.id) };
+  return { id: uid(), name: '', os: 'Linux', location: '', ram: 0, disk: 0, dr: false, drGb: 0, ratioId: dr, storageId: ds, addons: pricing.addons.filter(a => a.defaultOn).map(a => a.id) };
 }
 
 /* ---------------- storage unit helpers ----------------
@@ -63,7 +67,31 @@ const rateNum = s => SU(s) === 'GB'
 const rateStr = s => '$' + rateNum(s) + '/' + SU(s);
 function normalizePricing(p) {
   (p.storage || []).forEach(s => { s.unit = SU(s); });
+  // backward compat: profiles saved before Zerto DR existed have no `dr` block
+  const d = defaultPricing().dr;
+  p.dr = p.dr && typeof p.dr === 'object' ? p.dr : {};
+  p.dr.storage = Object.assign({}, d.storage, p.dr.storage || {});
+  p.dr.fee = Object.assign({}, d.fee, p.dr.fee || {});
+  p.dr.storage.price = Number(p.dr.storage.price) || 0;
+  p.dr.fee.price = Number(p.dr.fee.price) || 0;
   return p;
+}
+
+/* ---------------- Zerto DR helpers ----------------
+   DR is opt-in per VM. `dr` is the protection flag, `drGb` the manually entered
+   replication footprint (journal + replica) — never derived from provisioned disk.
+   Older saved profiles / imported JSON have neither field: DR reads as off. */
+function normalizeVmDr(v) {
+  v.dr = v.dr === true || v.dr === 'true' || v.dr === 1;
+  v.drGb = Number(v.drGb) || 0;
+  return v;
+}
+const drRate = p => Number((p || P()).dr.storage.price) || 0;
+const drFeeRate = p => Number((p || P()).dr.fee.price) || 0;
+const drRateNum = n => (Number(n) || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 4 });
+function drSummary(p) {
+  const q = p || P();
+  return `$${drRateNum(drRate(q))}/GB DR storage + ${usd(drFeeRate(q))}/protected VM`;
 }
 /* human summary of how storage is billed, used in assumptions text */
 function storageUnitSummary(p) {
@@ -107,7 +135,7 @@ function load() {
           c.pricing = normalizePricing(Object.assign(defaultPricing(), c.pricing));
           c.vms = c.vms || [];
           // backward compat: profiles saved before locations existed
-          c.vms.forEach(v => { if (typeof v.location !== 'string') v.location = ''; });
+          c.vms.forEach(v => { if (typeof v.location !== 'string') v.location = ''; normalizeVmDr(v); });
         });
         if (!s.clients[s.activeId]) s.activeId = Object.keys(s.clients)[0];
         return s;
@@ -155,6 +183,12 @@ function costVm(vm) {
   const vmware = round(p.vmwareLic.enabled ? ram * (Number(p.vmwareLic.price) || 0) : 0);
   const storage = round(storageQty * (st ? Number(st.price) || 0 : 0));
   const spla = round(isWin(vm.os) ? (Number(p.spla.price) || 0) : 0);
+  // Zerto DR: protected VMs only. Unprotected VMs contribute $0 on both lines.
+  const drOn = vm.dr === true;
+  const drGb = drOn ? (Number(vm.drGb) || 0) : 0;
+  const drStorage = round(drOn ? drGb * drRate(p) : 0);
+  const drFee = round(drOn ? drFeeRate(p) : 0);
+  const dr = r2(drStorage + drFee);
   let addons = 0; const addonDetail = [];
   (vm.addons || []).forEach(id => {
     const a = p.addons.find(x => x.id === id); if (!a) return;
@@ -163,10 +197,10 @@ function costVm(vm) {
     addons += amt; addonDetail.push({ addon: a, qty: q, amt });
   });
   addons = round(addons);
-  const total = r2(compute + vmware + storage + spla + addons);
+  const total = r2(compute + vmware + storage + spla + addons + dr);
   return {
     vm, ram, disk, tb, ratio, storageTier: st, location: locOf(vm),
-    storageUnit, storageQty,
+    storageUnit, storageQty, drOn, drGb, drStorage, drFee, dr,
     ratioLabel: ratio ? (ratio.label || ratio.name) : '— none —',
     storageLabel: st ? st.name : '— none —',
     compute, vmware, storage, spla, addons, addonDetail, total, windows: isWin(vm.os)
@@ -221,6 +255,15 @@ function renderPricing() {
     </tr>`).join('');
   $('#addonEmpty').hidden = p.addons.length > 0;
   $('#addonTable').hidden = p.addons.length === 0;
+
+  // Zerto DR
+  $('#drStoSku').value = p.dr.storage.sku || ''; $('#drStoName').value = p.dr.storage.name || '';
+  $('#drStoPrice').value = p.dr.storage.price;
+  $('#drFeeSku').value = p.dr.fee.sku || ''; $('#drFeeName').value = p.dr.fee.name || '';
+  $('#drFeePrice').value = p.dr.fee.price;
+  $('#drStoEcho').textContent = '$' + drRateNum(p.dr.storage.price) + '/GB';
+  $('#drFeeEcho').textContent = usd(p.dr.fee.price) + '/VM';
+  $('#drEcho').textContent = drSummary(p);
 
   $('#setDivisor').value = String(p.settings.divisor);
   $('#setRounding').value = p.settings.rounding;
@@ -315,6 +358,10 @@ function renderVms() {
       <td><input class="in" data-f="location" list="locList" value="${esc(v.location || '')}" placeholder="Unassigned" aria-label="Data center location"></td>
       <td class="num"><input class="in num mono" type="number" min="0" step="1" data-f="ram" value="${v.ram}" aria-label="RAM in GB"></td>
       <td class="num"><input class="in num mono" type="number" min="0" step="1" data-f="disk" value="${v.disk}" aria-label="Provisioned disk in GB"></td>
+      <td class="dr-cell"><label class="switch" title="Protect this VM with Zerto replication"><input type="checkbox" data-f="dr" ${v.dr ? 'checked' : ''} aria-label="Zerto DR protected"><span class="track"></span></label></td>
+      <td class="num">${v.dr
+        ? `<input class="in num mono" type="number" min="0" step="1" data-f="drGb" value="${v.drGb || ''}" placeholder="0" aria-label="DR storage in GB">`
+        : '<span class="dash" title="Enable Zerto DR to enter DR storage">—</span>'}</td>
       <td><select data-f="ratioId" aria-label="Ratio tier">${rOpts(v.ratioId)}</select></td>
       <td><select data-f="storageId" aria-label="Storage tier">${sOpts(v.storageId)}</select></td>
       <td ${p.addons.length ? '' : 'hidden'}><div class="addon-cell">${p.addons.map(a => `
@@ -333,6 +380,7 @@ function renderVms() {
   }
   const bulkR = $('#bulkRatio'), bulkS = $('#bulkStorage');
   bulkR.innerHTML = '<option value="">Set ratio tier for all…</option>' + p.ratios.map(r => `<option value="${r.id}">${esc(r.label || r.name)}</option>`).join('');
+  $('#bulkDr').value = '';
   bulkS.innerHTML = '<option value="">Set storage tier for all…</option>' + p.storage.map(s => `<option value="${s.id}">${esc(shortTier(s.name))} — ${esc(rateStr(s))}</option>`).join('');
 }
 const shortTier = n => String(n).replace(/^Enterprise Cloud Storage\s*[—-]\s*/i, '');
@@ -353,9 +401,9 @@ function renderResults() {
 
   const T = rows.reduce((a, r) => ({
     compute: a.compute + r.compute, vmware: a.vmware + r.vmware, storage: a.storage + r.storage,
-    spla: a.spla + r.spla, addons: a.addons + r.addons, total: a.total + r.total,
-    ram: a.ram + r.ram, disk: a.disk + r.disk
-  }), { compute: 0, vmware: 0, storage: 0, spla: 0, addons: 0, total: 0, ram: 0, disk: 0 });
+    spla: a.spla + r.spla, addons: a.addons + r.addons, dr: a.dr + r.dr, total: a.total + r.total,
+    ram: a.ram + r.ram, disk: a.disk + r.disk, drGb: a.drGb + r.drGb, drVms: a.drVms + (r.drOn ? 1 : 0)
+  }), { compute: 0, vmware: 0, storage: 0, spla: 0, addons: 0, dr: 0, total: 0, ram: 0, disk: 0, drGb: 0, drVms: 0 });
   const winCount = rows.filter(r => r.windows).length;
 
   $('#resultsSub').textContent = `${rows.length} VM${rows.length === 1 ? '' : 's'} · ${active().name}`
@@ -366,12 +414,13 @@ function renderResults() {
     ${kpi('Total VMs', rows.length, `${winCount} Windows · ${rows.length - winCount} non-Windows`)}
     ${kpi('Total RAM', num(T.ram) + ' GB', 'billed per GB / month')}
     ${kpi('Total disk', num(T.disk) + ' GB', num(T.disk / P().settings.divisor) + ' TB @ ÷' + P().settings.divisor)}
+    ${kpi('Zerto DR', usd(T.dr), `${T.drVms} of ${rows.length} protected · ${num(T.drGb)} DR GB`)}
     ${kpi('Monthly cost', usd(T.total), usd(T.total * 12) + ' / yr', true)}
     ${kpi('Avg cost / VM', usd(T.total / rows.length), 'across all tiers')}`;
 
   const dir = sort.dir === 'asc' ? 1 : -1;
   const key = sort.key;
-  const val = r => ({ name: r.vm.name.toLowerCase(), os: String(r.vm.os).toLowerCase(), location: r.location.toLowerCase(), ram: r.ram, disk: r.disk, ratio: r.ratioLabel, storage: r.storageLabel, compute: r.compute, vmware: r.vmware, storageCost: r.storage, spla: r.spla, addons: r.addons, total: r.total }[key]);
+  const val = r => ({ name: r.vm.name.toLowerCase(), os: String(r.vm.os).toLowerCase(), location: r.location.toLowerCase(), ram: r.ram, disk: r.disk, ratio: r.ratioLabel, storage: r.storageLabel, compute: r.compute, vmware: r.vmware, storageCost: r.storage, spla: r.spla, addons: r.addons, dr: r.dr, total: r.total }[key]);
   const sorted = rows.slice().sort((a, a2) => { const x = val(a), y = val(a2); return (typeof x === 'string' ? x.localeCompare(y) : x - y) * dir; });
 
   $('#resTable tbody').innerHTML = sorted.map((r, i) => `
@@ -389,6 +438,7 @@ function renderResults() {
       <td class="num${r.storage ? '' : ' zero'}">${usd(r.storage)}</td>
       <td class="num${r.spla ? '' : ' zero'}">${usd(r.spla)}</td>
       <td class="num${r.addons ? '' : ' zero'}">${usd(r.addons)}</td>
+      <td class="num${r.dr ? '' : ' zero'}"${r.drOn ? ` title="${num(r.drGb)} DR GB × $${drRateNum(drRate(P()))}/GB + ${usd(drFeeRate(P()))} fee"` : ' title="Not Zerto-protected"'}>${usd(r.dr)}</td>
       <td class="num total">${usd(r.total)}</td>
       <td class="spacer"></td>
     </tr>`).join('');
@@ -399,7 +449,7 @@ function renderResults() {
       <td class="num">${num(T.ram)}</td><td class="num">${num(T.disk)}</td>
       <td colspan="2"></td>
       <td class="num">${usd(T.compute)}</td><td class="num">${usd(T.vmware)}</td><td class="num">${usd(T.storage)}</td>
-      <td class="num">${usd(T.spla)}</td><td class="num">${usd(T.addons)}</td>
+      <td class="num">${usd(T.spla)}</td><td class="num">${usd(T.addons)}</td><td class="num">${usd(T.dr)}</td>
       <td class="num" style="color:var(--primary)">${usd(T.total)}</td>
       <td class="spacer"></td>
     </tr>`;
@@ -409,7 +459,8 @@ function renderResults() {
     th.classList.toggle('asc', th.dataset.sort === key && sort.dir === 'asc');
   });
 
-  $('#resStorageNote').textContent = 'Storage: ' + storageUnitSummary(P()) + '.';
+  $('#resStorageNote').textContent = 'Storage: ' + storageUnitSummary(P()) + '. Zerto DR: ' + drSummary(P())
+    + ` · ${T.drVms} protected VM${T.drVms === 1 ? '' : 's'}.`;
   $('#resStorageNote').hidden = false;
 
   renderRollup(rows);
@@ -435,11 +486,12 @@ function locationTotals(rows) {
   const map = new Map();
   rows.forEach(r => {
     const k = r.location;
-    if (!map.has(k)) map.set(k, { location: k, vms: 0, ram: 0, disk: 0, tb: 0, compute: 0, vmware: 0, storage: 0, spla: 0, addons: 0, total: 0 });
+    if (!map.has(k)) map.set(k, { location: k, vms: 0, ram: 0, disk: 0, tb: 0, compute: 0, vmware: 0, storage: 0, spla: 0, addons: 0, dr: 0, drGb: 0, drVms: 0, total: 0 });
     const o = map.get(k);
     o.vms++; o.ram += r.ram; o.disk += r.disk; o.tb += r.tb;
     o.compute += r.compute; o.vmware += r.vmware; o.storage += r.storage;
-    o.spla += r.spla; o.addons += r.addons; o.total += r.total;
+    o.spla += r.spla; o.addons += r.addons; o.dr += r.dr;
+    o.drGb += r.drGb; o.drVms += r.drOn ? 1 : 0; o.total += r.total;
   });
   return Array.from(map.values()).sort((a, b) => locSort(a.location, b.location));
 }
@@ -448,8 +500,8 @@ function renderLocationRollup(rows) {
   const G = groups.reduce((a, g) => ({
     vms: a.vms + g.vms, ram: a.ram + g.ram, disk: a.disk + g.disk,
     compute: a.compute + g.compute, vmware: a.vmware + g.vmware, storage: a.storage + g.storage,
-    spla: a.spla + g.spla, addons: a.addons + g.addons, total: a.total + g.total
-  }), { vms: 0, ram: 0, disk: 0, compute: 0, vmware: 0, storage: 0, spla: 0, addons: 0, total: 0 });
+    spla: a.spla + g.spla, addons: a.addons + g.addons, dr: a.dr + g.dr, total: a.total + g.total
+  }), { vms: 0, ram: 0, disk: 0, compute: 0, vmware: 0, storage: 0, spla: 0, addons: 0, dr: 0, total: 0 });
 
   $('#locRollupCount').textContent = `${groups.length} location${groups.length === 1 ? '' : 's'}`;
   $('#locationRollup tbody').innerHTML = groups.map(g => `<tr>
@@ -462,6 +514,7 @@ function renderLocationRollup(rows) {
       <td class="num mono${g.storage ? '' : ' zero'}">${usd(g.storage)}</td>
       <td class="num mono${g.spla ? '' : ' zero'}">${usd(g.spla)}</td>
       <td class="num mono${g.addons ? '' : ' zero'}">${usd(g.addons)}</td>
+      <td class="num mono${g.dr ? '' : ' zero'}" title="${g.drVms} protected VM${g.drVms === 1 ? '' : 's'} · ${num(g.drGb)} DR GB">${usd(g.dr)}</td>
       <td class="num mono strong">${usd(g.total)}</td>
       <td class="num mono muted">${G.total ? (g.total / G.total * 100).toFixed(1) : '0.0'}%</td>
     </tr>`).join('');
@@ -469,7 +522,7 @@ function renderLocationRollup(rows) {
       <td class="label">All locations</td>
       <td class="num">${G.vms}</td><td class="num">${num(G.ram)}</td><td class="num">${num(G.disk)}</td>
       <td class="num">${usd(G.compute)}</td><td class="num">${usd(G.vmware)}</td><td class="num">${usd(G.storage)}</td>
-      <td class="num">${usd(G.spla)}</td><td class="num">${usd(G.addons)}</td>
+      <td class="num">${usd(G.spla)}</td><td class="num">${usd(G.addons)}</td><td class="num">${usd(G.dr)}</td>
       <td class="num" style="color:var(--primary)">${usd(G.total)}</td><td class="num">100%</td>
     </tr>`;
 }
@@ -496,6 +549,15 @@ function renderRollup(rows) {
     const qty = rr.reduce((a, r) => a + (u === 'GB' ? r.disk : r.tb), 0);
     out.push([st.sku, `${st.name} (${rr.length} VM${rr.length > 1 ? 's' : ''})`, num(qty) + ' ' + u, '$' + rateNum(st) + ' /' + u, rr.reduce((a, r) => a + r.storage, 0)]);
   });
+  // Zerto DR: two rows — metered DR storage (total GB) and the flat per-protected-VM fee
+  const prot = rows.filter(r => r.drOn);
+  if (prot.length) {
+    const gb = prot.reduce((a, r) => a + r.drGb, 0);
+    out.push([p.dr.storage.sku, `${p.dr.storage.name} (${prot.length} protected VM${prot.length > 1 ? 's' : ''})`,
+      num(gb) + ' GB', '$' + drRateNum(drRate(p)) + ' /GB', prot.reduce((a, r) => a + r.drStorage, 0)]);
+    out.push([p.dr.fee.sku, `${p.dr.fee.name} (${prot.length} protected VM${prot.length > 1 ? 's' : ''})`,
+      prot.length + ' VMs', usd(drFeeRate(p)) + ' /VM', prot.reduce((a, r) => a + r.drFee, 0)]);
+  }
   const wins = rows.filter(r => r.windows);
   if (wins.length) out.push([p.spla.sku, p.spla.name, wins.length + ' VMs', usd(p.spla.price) + ' /VM', wins.reduce((a, r) => a + r.spla, 0)]);
   p.addons.forEach(a => {
@@ -554,6 +616,7 @@ function reconcileVmTiers() {
   const dS = (p.storage.find(s => s.isDefault) || p.storage[0] || {}).id || '';
   const okA = new Set(p.addons.map(a => a.id));
   VMS().forEach(v => {
+    normalizeVmDr(v); // DR flag/GB always well-formed, whatever the profile vintage
     if (!p.ratios.some(r => r.id === v.ratioId)) v.ratioId = dR;
     if (!p.storage.some(s => s.id === v.storageId)) v.storageId = dS;
     v.addons = (v.addons || []).filter(a => okA.has(a));
@@ -682,12 +745,19 @@ function download(filename, text, mime) {
   document.body.appendChild(a); a.click(); a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 1500);
 }
-const SAMPLE_CSV = `Name,OS,Location,RAM_GB,Disk_GB,Ratio,StorageTier
-WEB01,Microsoft Windows Server 2022,Columbus - DUB,16,200,4:1,Standard Flash
-SQL01,Microsoft Windows Server 2019,Columbus - DUB,64,1024,2:1,High Performance Flash
-APP01,Ubuntu Linux 22.04,Indianapolis - 701 Congressional,32,500,4:1,Standard Flash
-FILE01,Microsoft Windows Server 2022,Indianapolis - 701 Congressional,8,1500,4:1,Standard Flash
+const SAMPLE_CSV = `Name,OS,Location,RAM_GB,Disk_GB,Zerto,DR_Storage_GB,Ratio,StorageTier
+WEB01,Microsoft Windows Server 2022,Columbus - DUB,16,200,yes,250,4:1,Standard Flash
+SQL01,Microsoft Windows Server 2019,Columbus - DUB,64,1024,yes,1200,2:1,High Performance Flash
+APP01,Ubuntu Linux 22.04,Indianapolis - 701 Congressional,32,500,no,,4:1,Standard Flash
+FILE01,Microsoft Windows Server 2022,Indianapolis - 701 Congressional,8,1500,no,,4:1,Standard Flash
 `;
+
+/* CSV DR flag parsing: accept the common truthy spellings used in inventory exports */
+function parseDrFlag(v) {
+  const s = String(v ?? '').trim().toLowerCase();
+  if (!s) return false;
+  return ['yes', 'y', 'true', 't', '1', 'x', 'on', 'enabled', 'protected', 'replicated', 'active'].includes(s);
+}
 
 const FIELDS = [
   { key: 'name', label: 'VM name', req: true, hints: ['name', 'vm', 'vm name', 'vmname', 'virtual machine', 'hostname', 'server'] },
@@ -695,6 +765,10 @@ const FIELDS = [
   { key: 'ram', label: 'RAM', req: true, hints: ['ram', 'ram_gb', 'ram gb', 'memory', 'memory mb', 'memory (gb)', 'memory size', 'mem'] },
   { key: 'disk', label: 'Provisioned disk', req: true, hints: ['disk', 'disk_gb', 'disk gb', 'provisioned', 'provisioned mb', 'provisioned mib', 'storage', 'total disk capacity', 'capacity', 'in use mb', 'allocated'] },
   { key: 'location', label: 'Location (optional)', req: false, hints: ['location', 'site', 'datacenter', 'data center', 'dc', 'data centre', 'facility', 'region', 'site name', 'dc name', 'location name'] },
+  { key: 'drFlag', label: 'Zerto DR protected (optional)', req: false, hints: ['zerto', 'dr', 'dr protected', 'dr flag', 'disaster recovery', 'replicated', 'replication', 'protected', 'zerto protected', 'zerto dr', 'draas'],
+    /* never grab a size column (“DR Storage GB”, “Journal MB”…) as the on/off flag */
+    avoid: /\b(gb|mb|tb|gib|mib|tib)\b|size|capacity|journal|replica/ },
+  { key: 'drGb', label: 'DR storage (optional)', req: false, hints: ['dr gb', 'dr storage', 'dr storage gb', 'zerto gb', 'journal', 'journal gb', 'replica', 'replica gb', 'dr size', 'replication gb', 'dr capacity'] },
   { key: 'ratio', label: 'Ratio tier (optional)', req: false, hints: ['ratio', 'ratio tier', 'processor ratio', 'tier', 'compute tier'] },
   { key: 'storage', label: 'Storage tier (optional)', req: false, hints: ['storagetier', 'storage tier', 'storage_tier', 'datastore', 'storage policy', 'storage profile', 'policy'] }
 ];
@@ -712,6 +786,7 @@ function autoMap(headers) {
     if (!best) for (const h of headers) {
       if (used.has(h)) continue;
       const n = norm(h);
+      if (f.avoid && f.avoid.test(n)) continue;
       // short hints (dc, os, vm, ram…) must match as whole words to avoid false positives like “Org vDC” → DC
       if (f.hints.some(x => x.length <= 3
         ? new RegExp('\\b' + x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\b').test(n)
@@ -758,6 +833,7 @@ function openMapper(file, parsed) {
       </select></label>`).join('');
   $('#mapDiskUnit').value = guessUnit(pending.map.disk, 'disk');
   $('#mapRamUnit').value = guessUnit(pending.map.ram, 'ram');
+  $('#mapDrUnit').value = guessUnit(pending.map.drGb, 'disk');
   $('#mapRatio').innerHTML = p.ratios.map(r => `<option value="${r.id}" ${r.isDefault ? 'selected' : ''}>${esc(r.label || r.name)}</option>`).join('');
   $('#mapStorage').innerHTML = p.storage.map(s => `<option value="${s.id}" ${s.isDefault ? 'selected' : ''}>${esc(shortTier(s.name))} — ${esc(rateStr(s))}</option>`).join('');
   syncLocationDatalist();
@@ -774,6 +850,7 @@ function buildImport() {
   const m = readMap(), p = P();
   const dScale = { GB: 1, MB: 1 / 1024, TB: 1024 }[$('#mapDiskUnit').value];
   const rScale = { GB: 1, MB: 1 / 1024 }[$('#mapRamUnit').value];
+  const drScale = { GB: 1, MB: 1 / 1024, TB: 1024 }[$('#mapDrUnit').value];
   const fbR = $('#mapRatio').value, fbS = $('#mapStorage').value;
   const fbLoc = String($('#mapLocation').value || '').trim();
   const warns = [];
@@ -786,6 +863,11 @@ function buildImport() {
     if (!name) warns.push(`Row ${i + 2}: missing name — imported as “(unnamed)”.`);
     if (!isFinite(ramRaw)) warns.push(`Row ${i + 2}: RAM not numeric — set to 0.`);
     if (!isFinite(diskRaw)) warns.push(`Row ${i + 2}: disk not numeric — set to 0.`);
+    const drGbRaw = m.drGb ? parseFloat(String(row[m.drGb]).replace(/[^0-9.\-]/g, '')) : NaN;
+    const drGb = r2((isFinite(drGbRaw) ? drGbRaw : 0) * drScale);
+    // If only the GB column is mapped, a positive DR footprint implies the VM is protected.
+    const drOn = m.drFlag ? parseDrFlag(row[m.drFlag]) : (m.drGb ? drGb > 0 : false);
+    if (m.drFlag && drOn && m.drGb && !(drGb > 0)) warns.push(`Row ${i + 2}: Zerto DR flagged on but no DR storage GB — only the flat fee will apply.`);
     const rt = m.ratio ? matchTier(p.ratios, row[m.ratio], ['label', 'name', 'sku']) : null;
     const st = m.storage ? matchTier(p.storage, row[m.storage], ['name', 'sku']) : null;
     if (m.ratio && !rt && String(row[m.ratio] || '').trim()) warns.push(`Row ${i + 2}: ratio “${row[m.ratio]}” not recognised — using fallback tier.`);
@@ -797,6 +879,8 @@ function buildImport() {
       location: (m.location ? String(row[m.location] ?? '').trim() : '') || fbLoc,
       ram: r2((isFinite(ramRaw) ? ramRaw : 0) * rScale),
       disk: r2((isFinite(diskRaw) ? diskRaw : 0) * dScale),
+      dr: drOn,
+      drGb: drOn ? drGb : 0,
       ratioId: rt ? rt.id : fbR,
       storageId: st ? st.id : fbS,
       addons: p.addons.filter(a => a.defaultOn).map(a => a.id)
@@ -806,15 +890,17 @@ function buildImport() {
 }
 function refreshPreview() {
   const { vms, warns, missing } = buildImport();
-  const head = ['Name', 'OS', 'Location', 'RAM GB', 'Disk GB', 'Ratio', 'Storage tier'];
+  const head = ['Name', 'OS', 'Location', 'RAM GB', 'Disk GB', 'Zerto DR', 'DR GB', 'Ratio', 'Storage tier'];
   $('#mapPreview thead').innerHTML = `<tr>${head.map(h => `<th>${h}</th>`).join('')}</tr>`;
   $('#mapPreview tbody').innerHTML = vms.slice(0, 8).map(v => `<tr>
       <td>${esc(v.name)}</td><td>${esc(v.os) || '<span class="dash">—</span>'}</td>
       <td class="${v.location ? '' : 'unassigned'}">${esc(v.location || UNASSIGNED)}</td>
       <td class="num mono">${num(v.ram)}</td><td class="num mono">${num(v.disk)}</td>
+      <td class="${v.dr ? 'mono' : 'unassigned'}">${v.dr ? 'yes' : 'no'}</td>
+      <td class="num mono">${v.dr ? num(v.drGb) : '<span class="dash">—</span>'}</td>
       <td>${esc((P().ratios.find(r => r.id === v.ratioId) || {}).label || '—')}</td>
       <td>${esc(shortTier((P().storage.find(s => s.id === v.storageId) || {}).name || '—'))}</td></tr>`).join('')
-    || '<tr><td colspan="7" class="muted">No importable rows with the current mapping.</td></tr>';
+    || '<tr><td colspan="9" class="muted">No importable rows with the current mapping.</td></tr>';
   $('#mapPrevInfo').textContent = `${vms.length} row(s) ready · showing first ${Math.min(8, vms.length)}`;
   const msgs = [];
   if (missing.length) msgs.push(`<strong>Required column${missing.length > 1 ? 's' : ''} not mapped:</strong> ${missing.join(', ')}.`);
@@ -831,24 +917,34 @@ function exportResultsCsv() {
   if (!rows.length) return toast('No VMs to export.', true);
   const p = P();
   const head = ['Name', 'OS', 'Location', 'RAM_GB', 'Disk_GB', 'Disk_TB', 'RatioTier', 'RatioRate_perGB', 'StorageTier', 'StorageUnit', 'StorageBilledQty', 'StorageRate_perUnit',
-    'Compute_USD', 'VMwareLicensing_USD', 'Storage_USD', 'WindowsSPLA_USD', 'Addons_USD', 'TotalMonthly_USD'];
+    'ZertoDR', 'DRStorage_GB', 'Compute_USD', 'VMwareLicensing_USD', 'Storage_USD', 'WindowsSPLA_USD', 'Addons_USD', 'DR_USD', 'TotalMonthly_USD'];
   const lines = [head];
   rows.forEach(r => lines.push([
     r.vm.name, r.vm.os, r.location, r.ram, r.disk, r2(r.tb), r.ratioLabel, r.ratio ? r.ratio.price : 0,
     shortTier(r.storageLabel), r.storageUnit, r2(r.storageQty), r.storageTier ? r.storageTier.price : 0,
-    r2(r.compute), r2(r.vmware), r2(r.storage), r2(r.spla), r2(r.addons), r2(r.total)
+    r.drOn ? 'yes' : 'no', r2(r.drGb),
+    r2(r.compute), r2(r.vmware), r2(r.storage), r2(r.spla), r2(r.addons), r2(r.dr), r2(r.total)
   ]));
-  const T = rows.reduce((a, r) => [a[0] + r.ram, a[1] + r.disk, a[2] + r.compute, a[3] + r.vmware, a[4] + r.storage, a[5] + r.spla, a[6] + r.addons, a[7] + r.total], [0, 0, 0, 0, 0, 0, 0, 0]);
+  const T = rows.reduce((a, r) => [a[0] + r.ram, a[1] + r.disk, a[2] + r.compute, a[3] + r.vmware, a[4] + r.storage, a[5] + r.spla, a[6] + r.addons, a[7] + r.total, a[8] + r.dr, a[9] + r.drGb, a[10] + (r.drOn ? 1 : 0)], [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
   lines.push([]);
-  lines.push(['TOTAL (' + rows.length + ' VMs)', '', '', T[0], T[1], r2(T[1] / p.settings.divisor), '', '', '', '', '', '', r2(T[2]), r2(T[3]), r2(T[4]), r2(T[5]), r2(T[6]), r2(T[7])]);
+  lines.push(['TOTAL (' + rows.length + ' VMs)', '', '', T[0], T[1], r2(T[1] / p.settings.divisor), '', '', '', '', '', '', T[10] + ' protected', r2(T[9]), r2(T[2]), r2(T[3]), r2(T[4]), r2(T[5]), r2(T[6]), r2(T[8]), r2(T[7])]);
 
   // --- location summary block ---
   const groups = locationTotals(rows);
   lines.push([]);
   lines.push(['COST BY LOCATION']);
-  lines.push(['Location', 'VMs', 'RAM_GB', 'Disk_GB', 'Disk_TB', 'Compute_USD', 'VMwareLicensing_USD', 'Storage_USD', 'WindowsSPLA_USD', 'Addons_USD', 'TotalMonthly_USD', 'ShareOfTotal_pct']);
-  groups.forEach(g => lines.push([g.location, g.vms, r2(g.ram), r2(g.disk), r2(g.tb), r2(g.compute), r2(g.vmware), r2(g.storage), r2(g.spla), r2(g.addons), r2(g.total), T[7] ? r2(g.total / T[7] * 100) : 0]));
-  lines.push(['All locations (' + groups.length + ')', rows.length, r2(T[0]), r2(T[1]), r2(T[1] / p.settings.divisor), r2(T[2]), r2(T[3]), r2(T[4]), r2(T[5]), r2(T[6]), r2(T[7]), 100]);
+  lines.push(['Location', 'VMs', 'RAM_GB', 'Disk_GB', 'Disk_TB', 'ProtectedVMs', 'DRStorage_GB', 'Compute_USD', 'VMwareLicensing_USD', 'Storage_USD', 'WindowsSPLA_USD', 'Addons_USD', 'DR_USD', 'TotalMonthly_USD', 'ShareOfTotal_pct']);
+  groups.forEach(g => lines.push([g.location, g.vms, r2(g.ram), r2(g.disk), r2(g.tb), g.drVms, r2(g.drGb), r2(g.compute), r2(g.vmware), r2(g.storage), r2(g.spla), r2(g.addons), r2(g.dr), r2(g.total), T[7] ? r2(g.total / T[7] * 100) : 0]));
+  lines.push(['All locations (' + groups.length + ')', rows.length, r2(T[0]), r2(T[1]), r2(T[1] / p.settings.divisor), T[10], r2(T[9]), r2(T[2]), r2(T[3]), r2(T[4]), r2(T[5]), r2(T[6]), r2(T[8]), r2(T[7]), 100]);
+
+  // --- Zerto DR roll-up (two SKU lines, protected VMs only) ---
+  lines.push([]);
+  lines.push(['ZERTO DR ROLL-UP']);
+  lines.push(['SKU', 'Charge', 'Quantity', 'Rate', 'Monthly_USD']);
+  lines.push([p.dr.storage.sku || '', p.dr.storage.name, r2(T[9]) + ' GB', '$' + drRateNum(drRate(p)) + ' per GB',
+    r2(rows.reduce((a, r) => a + r.drStorage, 0))]);
+  lines.push([p.dr.fee.sku || '', p.dr.fee.name, T[10] + ' protected VMs', usd(drFeeRate(p)) + ' per VM',
+    r2(rows.reduce((a, r) => a + r.drFee, 0))]);
 
   lines.push([]);
   lines.push(['Client', active().name]);
@@ -859,6 +955,7 @@ function exportResultsCsv() {
   p.storage.forEach(s => lines.push(['Storage tier rate', `${s.sku ? s.sku + ' · ' : ''}${s.name}`, '$' + rateNum(s) + ' per ' + SU(s)]));
   lines.push(['VMware licensing applied', p.vmwareLic.enabled ? 'yes @ ' + usd(p.vmwareLic.price) + '/GB RAM' : 'no']);
   lines.push(['Windows SPLA', usd(p.spla.price) + ' per Windows VM']);
+  lines.push(['Zerto DR basis', 'protected VMs only · ' + drSummary(p) + ' · DR storage GB entered manually per VM (not derived from provisioned disk)']);
   const csv = lines.map(l => l.map(c => {
     let s = String(c ?? '');
     // Neutralize spreadsheet formula injection (leading = + - @) in text cells
@@ -918,6 +1015,23 @@ function initEvents() {
   licBind.forEach(([sel, fn]) => $(sel).addEventListener('input', e => { fn(P())(e.target.value); afterPricingChange(false); }));
   $('#licVmPrice').addEventListener('input', e => { P().vmwareLic.price = parseFloat(e.target.value) || 0; afterPricingChange(false); });
   $('#splaPrice').addEventListener('input', e => { P().spla.price = parseFloat(e.target.value) || 0; afterPricingChange(false); });
+
+  // Zerto DR pricing
+  const drBind = [['#drStoSku', v => P().dr.storage.sku = v], ['#drStoName', v => P().dr.storage.name = v],
+    ['#drFeeSku', v => P().dr.fee.sku = v], ['#drFeeName', v => P().dr.fee.name = v]];
+  drBind.forEach(([sel, fn]) => $(sel).addEventListener('input', e => { fn(e.target.value); afterPricingChange(false); }));
+  $('#drStoPrice').addEventListener('input', e => {
+    P().dr.storage.price = parseFloat(e.target.value) || 0;
+    $('#drStoEcho').textContent = '$' + drRateNum(P().dr.storage.price) + '/GB';
+    $('#drEcho').textContent = drSummary(P());
+    afterPricingChange(false);
+  });
+  $('#drFeePrice').addEventListener('input', e => {
+    P().dr.fee.price = parseFloat(e.target.value) || 0;
+    $('#drFeeEcho').textContent = usd(P().dr.fee.price) + '/VM';
+    $('#drEcho').textContent = drSummary(P());
+    afterPricingChange(false);
+  });
   $('#licVmEnabled').addEventListener('change', e => { P().vmwareLic.enabled = e.target.checked; afterPricingChange(false); toast(e.target.checked ? 'VMware licensing applied to all VMs.' : 'VMware licensing excluded.'); });
   $('#setDivisor').addEventListener('change', e => { P().settings.divisor = parseInt(e.target.value, 10); $('#divisorEcho').textContent = e.target.value; $('#storageUnitEcho').textContent = storageUnitSummary(P()); afterPricingChange(false); });
   $('#setRounding').addEventListener('change', e => { P().settings.rounding = e.target.value; afterPricingChange(false); });
@@ -928,7 +1042,7 @@ function initEvents() {
     const tr = e.target.closest('tr[data-id]'); if (!tr) return;
     const vm = VMS().find(v => v.id === tr.dataset.id); if (!vm) return;
     const f = e.target.dataset.f;
-    if (f === 'ram' || f === 'disk') vm[f] = parseFloat(e.target.value) || 0;
+    if (f === 'ram' || f === 'disk' || f === 'drGb') vm[f] = parseFloat(e.target.value) || 0;
     else if (f === 'name') vm.name = e.target.value;
     else if (f === 'location') vm.location = e.target.value;
     else if (f === 'os') {
@@ -941,6 +1055,15 @@ function initEvents() {
     const tr = e.target.closest('tr[data-id]'); if (!tr) return;
     const vm = VMS().find(v => v.id === tr.dataset.id); if (!vm) return;
     if (e.target.dataset.f === 'location') syncLocationDatalist(); // refresh autocomplete after edit
+    if (e.target.dataset.f === 'dr') {
+      vm.dr = e.target.checked;
+      // keep drGb on the VM when unprotected (cost is $0 either way) so re-enabling restores it
+      renderVms(); // show / hide the DR storage input
+      commit('inventory', { force: false });
+      const gbEl = $(`tr[data-id="${vm.id}"] [data-f="drGb"]`, vmt);
+      if (gbEl) gbEl.focus();
+      return;
+    }
     if (e.target.dataset.f === 'ratioId') vm.ratioId = e.target.value;
     if (e.target.dataset.f === 'storageId') vm.storageId = e.target.value;
     if (e.target.dataset.addon) {
@@ -980,6 +1103,16 @@ function initEvents() {
     renderVms(); commit('inventory');
     toast(val ? `Location “${val}” applied to all VMs.` : 'Location cleared on all VMs.');
   });
+  $('#bulkDr').addEventListener('change', e => {
+    const v = e.target.value; e.target.value = '';
+    if (!v || !VMS().length) return;
+    const on = v === 'on';
+    if (!confirm(on ? `Enable Zerto DR on all ${VMS().length} VMs? Enter each VM’s DR storage GB afterwards.`
+      : `Disable Zerto DR on all ${VMS().length} VMs? Their DR storage GB values will be cleared.`)) return;
+    VMS().forEach(x => { x.dr = on; if (!on) x.drGb = 0; });
+    renderVms(); commit('inventory');
+    toast(on ? 'Zerto DR enabled on all VMs.' : 'Zerto DR disabled on all VMs.');
+  });
   $('#locFilter').addEventListener('change', e => { locFilter = e.target.value; renderResults(); });
 
   // results sorting / export
@@ -1012,9 +1145,10 @@ function initEvents() {
   $('#mapGrid').addEventListener('change', e => {
     if (e.target.dataset.map === 'disk') $('#mapDiskUnit').value = guessUnit(e.target.value, 'disk');
     if (e.target.dataset.map === 'ram') $('#mapRamUnit').value = guessUnit(e.target.value, 'ram');
+    if (e.target.dataset.map === 'drGb') $('#mapDrUnit').value = guessUnit(e.target.value, 'disk');
     refreshPreview();
   });
-  ['#mapDiskUnit', '#mapRamUnit', '#mapRatio', '#mapStorage', '#mapLocation'].forEach(s => $(s).addEventListener('change', refreshPreview));
+  ['#mapDiskUnit', '#mapRamUnit', '#mapDrUnit', '#mapRatio', '#mapStorage', '#mapLocation'].forEach(s => $(s).addEventListener('change', refreshPreview));
   $('#mapLocation').addEventListener('input', refreshPreview);
   $$('#mapModal [data-close]').forEach(b => b.addEventListener('click', () => { $('#mapModal').hidden = true; pending = null; }));
   $('#mapModal').addEventListener('click', e => { if (e.target.id === 'mapModal') { $('#mapModal').hidden = true; pending = null; } });
@@ -1092,6 +1226,8 @@ function initEvents() {
             vms: (c.vms || []).map(v => Object.assign({}, v, {
               id: uid(),
               location: typeof v.location === 'string' ? v.location : '', // legacy profiles: no location -> Unassigned
+              dr: v.dr === true || v.dr === 'true' || v.dr === 1, // legacy profiles: no dr -> unprotected
+              drGb: (v.dr === true || v.dr === 'true' || v.dr === 1) ? (Number(v.drGb) || 0) : 0,
               ratioId: v.ratioId || dR, storageId: v.storageId || dS, addons: v.addons || []
             })), updated: Date.now() };
           state.clients[id] = cl; last = id;
@@ -1127,7 +1263,10 @@ if (!STORE.getItem(LS_KEY)) {
     return res.data.map(row => {
       const rt = matchTier(p.ratios, row.Ratio, ['label', 'name', 'sku']);
       const st = matchTier(p.storage, row.StorageTier, ['name', 'sku']);
-      return { id: uid(), name: row.Name, os: row.OS, location: (row.Location || '').trim(), ram: parseFloat(row.RAM_GB) || 0, disk: parseFloat(row.Disk_GB) || 0, ratioId: (rt || p.ratios[0]).id, storageId: (st || p.storage[0]).id, addons: [] };
+      const drOn = parseDrFlag(row.Zerto);
+      return { id: uid(), name: row.Name, os: row.OS, location: (row.Location || '').trim(), ram: parseFloat(row.RAM_GB) || 0, disk: parseFloat(row.Disk_GB) || 0,
+        dr: drOn, drGb: drOn ? (parseFloat(row.DR_Storage_GB) || 0) : 0,
+        ratioId: (rt || p.ratios[0]).id, storageId: (st || p.storage[0]).id, addons: [] };
     });
   })();
   pending = null;

@@ -1,5 +1,5 @@
-Name,OS,Location,RAM_GB,Disk_GB,Ratio,StorageTier
-WEB01,Microsoft Windows Server 2022,Columbus - DUB,16,200,4:1,Standard Flash
-SQL01,Microsoft Windows Server 2019,Columbus - DUB,64,1024,2:1,High Performance Flash
-APP01,Ubuntu Linux 22.04,Indianapolis - 701 Congressional,32,500,4:1,Standard Flash
-FILE01,Microsoft Windows Server 2022,Indianapolis - 701 Congressional,8,1500,4:1,Standard Flash
+Name,OS,Location,RAM_GB,Disk_GB,Zerto,DR_Storage_GB,Ratio,StorageTier
+WEB01,Microsoft Windows Server 2022,Columbus - DUB,16,200,yes,250,4:1,Standard Flash
+SQL01,Microsoft Windows Server 2019,Columbus - DUB,64,1024,yes,1200,2:1,High Performance Flash
+APP01,Ubuntu Linux 22.04,Indianapolis - 701 Congressional,32,500,no,,4:1,Standard Flash
+FILE01,Microsoft Windows Server 2022,Indianapolis - 701 Congressional,8,1500,no,,4:1,Standard Flash

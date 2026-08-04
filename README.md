@@ -11,10 +11,11 @@ A reusable, pure client-side web app for calculating monthly cost per VM in a VM
   - Storage tiers priced **per TB or per GB** (SKU 3815 High Performance Flash, 3819 Standard Flash)
   - VMware licensing per GB RAM (SKU 2729) with apply-to-all toggle
   - Windows Server SPLA per VM (SKU 2589), auto-applied when the OS contains "Windows"
+  - **Disaster recovery (Zerto)** — DR storage priced per GB of replicated footprint plus a flat Zerto replication fee per protected VM (both with editable SKU codes)
   - Custom add-ons priced per VM, per GB RAM, or per TB disk
   - Configurable GB→TB divisor (1024 or 1000)
-- **VM inventory** — manual entry or CSV import with a column-mapping step (auto-detects RVTools / Cloud Director headers, MB/GB/TB units, location columns), per-VM ratio tier, storage tier, data center location, and add-ons
-- **Cost breakdown** — sortable per-VM table with drag-resizable columns and a frozen server-name column, KPI summary cards, SKU roll-up, cost-by-location roll-up with location filter, CSV export
+- **VM inventory** — manual entry or CSV import with a column-mapping step (auto-detects RVTools / Cloud Director headers, MB/GB/TB units, location columns, Zerto DR flag and DR storage columns), per-VM ratio tier, storage tier, data center location, **Zerto DR toggle with a manually entered DR storage (GB) value**, and add-ons
+- **Cost breakdown** — sortable per-VM table (including a DR $ column) with drag-resizable columns and a frozen server-name column, KPI summary cards, SKU roll-up, cost-by-location roll-up with location filter, CSV export
 - **Multi-client profiles** — save/load client environments (VM list + pricing) in browser localStorage, with JSON export/import for backup and sharing
 
 ## Architecture
@@ -39,7 +40,12 @@ monthly_cost(vm) =
   + storage_qty × storage_tier_rate         (qty = Disk_GB or Disk_GB ÷ divisor, per tier unit)
   + SPLA_flat_fee                           (if OS contains "windows")
   + selected add-ons                        (per VM / per GB RAM / per TB disk)
+  + DR_storage_GB × dr_storage_rate         (if Zerto DR enabled for this VM, else 0)
+  + zerto_replication_fee                   (if Zerto DR enabled for this VM, else 0)
 ```
+
+Zerto DR charges apply only to VMs flagged as protected. `DR_storage_GB` is entered (or imported) per VM
+and is never derived from provisioned disk. Example: 500 DR GB at $0.15/GB + a $25.00 replication fee = **$100.00 / mo** of DR cost.
 
 ## Development
 
