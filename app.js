@@ -52,7 +52,7 @@ function newClient(name, pricing) {
 function blankVm(pricing) {
   const dr = (pricing.ratios.find(r => r.isDefault) || pricing.ratios[0] || {}).id || '';
   const ds = (pricing.storage.find(s => s.isDefault) || pricing.storage[0] || {}).id || '';
-  return { id: uid(), name: '', os: 'Linux', location: '', ram: 0, disk: 0, dr: false, drGb: 0, ratioId: dr, storageId: ds, addons: pricing.addons.filter(a => a.defaultOn).map(a => a.id) };
+  return { id: uid(), name: '', os: 'Linux', location: '', ram: 0, disk: 0, dr: false, drGb: 0, ratioId: dr, storageId: ds, tags: [], addons: pricing.addons.filter(a => a.defaultOn).map(a => a.id) };
 }
 
 /* ---------------- storage unit helpers ----------------
@@ -103,6 +103,58 @@ function storageUnitSummary(p) {
     + `${gb.length} priced per GB: ` + gb.map(s => shortTier(s.name)).join(', ');
 }
 
+/* ---------------- VM tag helpers ----------------
+   Tags are reusable free-form labels stored per VM as an array of strings.
+   Normalisation rules (single source of truth for manual entry, bulk actions
+   and CSV import): trim whitespace, collapse inner runs of whitespace, drop
+   blanks, drop anything longer than TAG_MAX_LEN, de-duplicate
+   case-insensitively while keeping the first readable casing, cap at
+   TAG_MAX_PER_VM tags. Profiles saved before tags existed have no `tags`
+   field at all — those VMs read as an empty list everywhere. */
+const TAG_MAX_LEN = 32;
+const TAG_MAX_PER_VM = 12;
+const TAG_DELIM = ';'; // canonical export delimiter
+const TAG_SPLIT = /[;,|]/; // accepted import delimiters
+function cleanTag(t) {
+  return String(t ?? '').replace(/[\s\u00a0]+/g, ' ').trim();
+}
+/* Returns { tags, dropped: [{tag, why}] } so callers can surface validation. */
+function normalizeTagList(list) {
+  const out = [], seen = new Set(), dropped = [];
+  (Array.isArray(list) ? list : [list]).forEach(raw => {
+    const t = cleanTag(raw);
+    if (!t) { if (String(raw ?? '').length) dropped.push({ tag: String(raw), why: 'blank' }); return; }
+    if (t.length > TAG_MAX_LEN) { dropped.push({ tag: t, why: `longer than ${TAG_MAX_LEN} characters` }); return; }
+    const k = t.toLowerCase();
+    if (seen.has(k)) { dropped.push({ tag: t, why: 'duplicate' }); return; }
+    if (out.length >= TAG_MAX_PER_VM) { dropped.push({ tag: t, why: `over the ${TAG_MAX_PER_VM}-tag limit` }); return; }
+    seen.add(k); out.push(t);
+  });
+  return { tags: out, dropped };
+}
+const normalizeVmTags = v => { v.tags = normalizeTagList(v.tags || []).tags; return v; };
+const tagsOf = vm => (vm && Array.isArray(vm.tags) ? vm.tags : []);
+const tagsKey = vm => tagsOf(vm).map(t => t.toLowerCase());
+const tagsStr = vm => tagsOf(vm).join(TAG_DELIM + ' ');
+/* accepts "prod; tier-1 | finance" from a single CSV cell */
+const parseTagCell = s => normalizeTagList(String(s ?? '').split(TAG_SPLIT)).tags;
+/* Suggestions are derived from the live inventory — never a separate catalog. */
+function tagsUsed(vms) {
+  const seen = new Map();
+  (vms || VMS()).forEach(v => tagsOf(v).forEach(t => { const k = t.toLowerCase(); if (!seen.has(k)) seen.set(k, t); }));
+  return Array.from(seen.values()).sort((a, b) => a.localeCompare(b));
+}
+function tagCounts(vms) {
+  const m = new Map();
+  (vms || VMS()).forEach(v => tagsOf(v).forEach(t => { const k = t.toLowerCase(); m.set(k, (m.get(k) || 0) + 1); }));
+  return m;
+}
+function syncTagDatalist() {
+  let dl = $('#tagList');
+  if (!dl) { dl = document.createElement('datalist'); dl.id = 'tagList'; document.body.appendChild(dl); }
+  dl.innerHTML = tagsUsed().map(t => `<option value="${esc(t)}">`).join('');
+}
+
 /* ---------------- location helpers ----------------
    Location is optional free text. Older saved profiles have no `location`
    field at all — those VMs read as "Unassigned" everywhere. */
@@ -121,9 +173,9 @@ function syncLocationDatalist() {
 
 /* ---------------- state ---------------- */
 let state = load();
-let sort = { key: 'total', dir: 'desc' };
 let locFilter = ''; // '' = all locations
 let pending = null; // csv import staging
+let selected = new Set(); // Cost breakdown row selection (vm ids, session-only)
 
 function load() {
   try {
@@ -135,7 +187,7 @@ function load() {
           c.pricing = normalizePricing(Object.assign(defaultPricing(), c.pricing));
           c.vms = c.vms || [];
           // backward compat: profiles saved before locations existed
-          c.vms.forEach(v => { if (typeof v.location !== 'string') v.location = ''; normalizeVmDr(v); });
+          c.vms.forEach(v => { if (typeof v.location !== 'string') v.location = ''; normalizeVmDr(v); normalizeVmTags(v); });
         });
         if (!s.clients[s.activeId]) s.activeId = Object.keys(s.clients)[0];
         return s;
@@ -199,7 +251,7 @@ function costVm(vm) {
   addons = round(addons);
   const total = r2(compute + vmware + storage + spla + addons + dr);
   return {
-    vm, ram, disk, tb, ratio, storageTier: st, location: locOf(vm),
+    vm, ram, disk, tb, ratio, storageTier: st, location: locOf(vm), tags: tagsOf(vm),
     storageUnit, storageQty, drOn, drGb, drStorage, drFee, dr,
     ratioLabel: ratio ? (ratio.label || ratio.name) : '— none —',
     storageLabel: st ? st.name : '— none —',
@@ -327,6 +379,7 @@ function bindCfg(tableSel) {
       VMS().forEach(v => v.addons = (v.addons || []).filter(a => a !== id));
     }
     reconcileVmTiers();
+    rulesDirty = true; // tier lists feed the rule value dropdowns
     renderPricing(); commit('pricing', { force: false });
   });
 }
@@ -365,6 +418,7 @@ function renderVms() {
         : '<span class="dash" title="Enable Zerto DR to enter DR storage">—</span>'}</td>
       <td><select data-f="ratioId" aria-label="Ratio tier">${rOpts(v.ratioId)}</select></td>
       <td><select data-f="storageId" aria-label="Storage tier">${sOpts(v.storageId)}</select></td>
+      <td class="tags-td">${tagBoxHtml(v)}</td>
       <td ${p.addons.length ? '' : 'hidden'}><div class="addon-cell">${p.addons.map(a => `
           <label class="addon-chip" title="${esc(a.name)} · ${usd(a.price)} ${a.unit}"><input type="checkbox" data-addon="${a.id}" ${(v.addons || []).includes(a.id) ? 'checked' : ''}>${esc(a.sku || a.name)}</label>`).join('') || '<span class="dash">—</span>'}</div></td>
       <td class="w-act">
@@ -374,6 +428,7 @@ function renderVms() {
     </tr>`).join('');
 
   syncLocationDatalist();
+  syncTagDatalist();
   if (!$('#osList')) {
     const dl = document.createElement('datalist'); dl.id = 'osList';
     dl.innerHTML = ['Microsoft Windows Server 2022', 'Microsoft Windows Server 2019', 'Microsoft Windows 11', 'Ubuntu Linux 22.04', 'Red Hat Enterprise Linux 9', 'CentOS Linux 7', 'Other'].map(o => `<option value="${o}">`).join('');
@@ -386,19 +441,345 @@ function renderVms() {
 }
 const shortTier = n => String(n).replace(/^Enterprise Cloud Storage\s*[—-]\s*/i, '');
 
+/* Chip/token editor for one VM's tags. Type + Enter (or , ; |) to add,
+   ✕ or Backspace-on-empty to remove. Suggestions come from #tagList. */
+function tagBoxHtml(v) {
+  const tags = tagsOf(v);
+  const label = esc(v.name || 'this VM');
+  return `<div class="token-box" data-tagbox="${v.id}">
+    ${tags.map(t => `<span class="tag-chip">${esc(t)}<button type="button" class="chip-x" data-tagdel="${esc(t)}" aria-label="Remove tag ${esc(t)} from ${label}" title="Remove tag">✕</button></span>`).join('')}
+    <input class="in tag-input" data-tagadd list="tagList" placeholder="${tags.length ? '+ tag' : 'Add tag…'}" aria-label="Add a tag to ${label}" autocomplete="off" maxlength="${TAG_MAX_LEN}">
+  </div>`;
+}
+/* Adds whatever is typed in a row's tag input to that VM. */
+function commitRowTagInput(input) {
+  const tr = input.closest('tr');
+  const box = input.closest('[data-tagbox]');
+  if (!tr || !box) return false;
+  const raw = input.value;
+  if (!cleanTag(raw)) { input.value = ''; return false; }
+  const vm = VMS().find(x => x.id === tr.dataset.id);
+  if (!vm) return false;
+  const res = normalizeTagList([...tagsOf(vm), ...String(raw).split(TAG_SPLIT)]);
+  const added = res.tags.length - tagsOf(vm).length;
+  vm.tags = res.tags;
+  input.value = '';
+  if (res.dropped.length) {
+    const d = res.dropped[0];
+    toast(`“${d.tag.slice(0, 40)}” skipped — ${d.why}.`, true);
+  }
+  if (!added && !res.dropped.length) return false;
+  const id = vm.id;
+  commit('inventory', { force: true }); // the chip only appears if the row re-renders
+  const again = $(`[data-tagbox="${id}"] .tag-input`);
+  if (again) again.focus();
+  return true;
+}
+function removeRowTag(tr, tag) {
+  const vm = VMS().find(x => x.id === tr.dataset.id);
+  if (!vm) return;
+  const k = String(tag).toLowerCase();
+  vm.tags = tagsOf(vm).filter(t => t.toLowerCase() !== k);
+  const id = vm.id;
+  commit('inventory', { force: true });
+  const again = $(`[data-tagbox="${id}"] .tag-input`);
+  if (again) again.focus();
+}
+
+/* ================= Cost breakdown: multi-sort =================
+   `ui().sort` is an ordered list of { key, dir } — index 0 is the primary key,
+   index 1 the first tie-breaker, and so on. It persists per client profile in
+   the same `ui` bag as the column widths. Plain header click = single sort
+   (re-click reverses); Shift-click = add the column as the next priority (or
+   reverse it if it is already in the list). */
+const SORT_TYPES = {
+  name: 'text', os: 'text', location: 'text', tags: 'text', ratio: 'text', storage: 'text',
+  ram: 'num', disk: 'num', compute: 'num', vmware: 'num', storageCost: 'num', spla: 'num',
+  addons: 'num', dr: 'num', total: 'num', drOn: 'bool'
+};
+const SORT_MAX = 4;
+const sortDefaultDir = key => (SORT_TYPES[key] === 'text' ? 'asc' : 'desc');
+function sortSpec() {
+  const u = ui();
+  if (u.sort && !Array.isArray(u.sort) && u.sort.key) u.sort = [{ key: u.sort.key, dir: u.sort.dir === 'asc' ? 'asc' : 'desc' }]; // legacy single-key state
+  if (!Array.isArray(u.sort) || !u.sort.length || !u.sort.every(s => s && SORT_TYPES[s.key])) u.sort = [{ key: 'total', dir: 'desc' }];
+  return u.sort;
+}
+function sortVal(r, key) {
+  switch (key) {
+    case 'name': return String(r.vm.name || '').toLowerCase();
+    case 'os': return String(r.vm.os || '').toLowerCase();
+    case 'location': return r.location.toLowerCase();
+    case 'tags': return r.tags.map(t => t.toLowerCase()).sort().join(' ');
+    case 'ratio': return String(r.ratioLabel).toLowerCase();
+    case 'storage': return shortTier(String(r.storageLabel)).toLowerCase();
+    case 'storageCost': return r.storage;
+    case 'drOn': return r.drOn ? 1 : 0;
+    default: return Number(r[key]) || 0;
+  }
+}
+function compareRows(a, b) {
+  for (const s of sortSpec()) {
+    const x = sortVal(a, s.key), y = sortVal(b, s.key);
+    const c = typeof x === 'string' ? x.localeCompare(y) : (x - y);
+    if (c) return s.dir === 'asc' ? c : -c;
+  }
+  // stable, predictable final tie-break so equal rows never shuffle between renders
+  return String(a.vm.name || '').localeCompare(String(b.vm.name || ''));
+}
+function applySortClick(key, additive) {
+  if (!SORT_TYPES[key]) return;
+  const spec = sortSpec();
+  const i = spec.findIndex(s => s.key === key);
+  if (additive) {
+    if (i >= 0) spec[i].dir = spec[i].dir === 'asc' ? 'desc' : 'asc';
+    else if (spec.length >= SORT_MAX) return toast(`Up to ${SORT_MAX} sort columns — remove one first (click a header without Shift to start over).`, true);
+    else spec.push({ key, dir: sortDefaultDir(key) });
+  } else if (i === 0 && spec.length === 1) {
+    spec[0].dir = spec[0].dir === 'asc' ? 'desc' : 'asc';
+  } else {
+    ui().sort = [{ key, dir: sortDefaultDir(key) }];
+  }
+  renderResults(); save(true);
+}
+const SORT_LABELS = { name: 'Name', os: 'OS', location: 'Location', tags: 'Tags', ratio: 'Ratio', storage: 'Storage tier', ram: 'RAM GB', disk: 'Disk GB', compute: 'Compute $', vmware: 'VMware lic $', storageCost: 'Storage $', spla: 'Win SPLA $', addons: 'Add-ons $', dr: 'DR $', total: 'Total / mo', drOn: 'Zerto' };
+function sortSummaryText() {
+  return sortSpec().map((s, i) => `${i ? 'then ' : ''}${SORT_LABELS[s.key]} ${s.dir === 'asc' ? '↑' : '↓'}`).join(', ');
+}
+function renderSortIndicators() {
+  const spec = sortSpec();
+  $$('#resTable th[data-sort]').forEach(th => {
+    const key = th.dataset.sort;
+    const i = spec.findIndex(s => s.key === key);
+    const on = i >= 0;
+    th.classList.toggle('sorted', on);
+    th.setAttribute('aria-sort', on ? (spec[i].dir === 'asc' ? 'ascending' : 'descending') : 'none');
+    const btn = th.querySelector('.th-sort');
+    if (!btn) return;
+    const ind = btn.querySelector('.sind');
+    if (ind) ind.textContent = on ? ((spec[i].dir === 'asc' ? '↑' : '↓') + (spec.length > 1 ? String(i + 1) : '')) : '';
+    btn.title = on
+      ? `Sorted ${spec[i].dir === 'asc' ? 'ascending' : 'descending'}${spec.length > 1 ? ` (priority ${i + 1} of ${spec.length})` : ''} — click to reverse, Shift-click to change its priority direction`
+      : 'Click to sort by this column, Shift-click to add it as an extra sort level';
+  });
+}
+
+/* ================= Cost breakdown: advanced filter builder =================
+   Rules live in `ui().filters` = { join:'AND'|'OR', rules:[{id,field,op,v1,v2}] }
+   and persist per client profile. A rule with no value yet is inert (counted as
+   “incomplete” in the summary) so a half-built rule never hides rows. */
+const FILTER_FIELDS = [
+  { key: 'name', label: 'Server name', type: 'text' },
+  { key: 'os', label: 'OS', type: 'text' },
+  { key: 'location', label: 'Location', type: 'select', options: () => locationsAll(allCosts()) },
+  { key: 'tags', label: 'Tags', type: 'tags' },
+  { key: 'ratio', label: 'Ratio tier', type: 'select', options: () => P().ratios.map(r => r.label || r.name) },
+  { key: 'storage', label: 'Storage tier', type: 'select', options: () => P().storage.map(s => shortTier(s.name)) },
+  { key: 'drOn', label: 'Zerto DR', type: 'bool', options: () => ['Protected', 'Not protected'] },
+  { key: 'windows', label: 'Windows SPLA applies', type: 'bool', options: () => ['Yes', 'No'] },
+  { key: 'ram', label: 'RAM GB', type: 'num' },
+  { key: 'disk', label: 'Disk GB', type: 'num' },
+  { key: 'drGb', label: 'DR storage GB', type: 'num' },
+  { key: 'compute', label: 'Compute $', type: 'num' },
+  { key: 'vmware', label: 'VMware lic $', type: 'num' },
+  { key: 'storageCost', label: 'Storage $', type: 'num' },
+  { key: 'spla', label: 'Win SPLA $', type: 'num' },
+  { key: 'addons', label: 'Add-ons $', type: 'num' },
+  { key: 'dr', label: 'DR $', type: 'num' },
+  { key: 'total', label: 'Total / mo $', type: 'num' }
+];
+const FILTER_OPS = {
+  text: [['contains', 'contains'], ['equals', 'equals'], ['not_contains', 'does not contain'], ['starts', 'starts with'], ['empty', 'is empty']],
+  num: [['eq', '='], ['ne', '≠'], ['gt', '>'], ['gte', '≥'], ['lt', '<'], ['lte', '≤'], ['between', 'between']],
+  select: [['is', 'is'], ['is_not', 'is not']],
+  bool: [['is', 'is'], ['is_not', 'is not']],
+  tags: [['any', 'contains any of'], ['all', 'contains all of'], ['none', 'contains none of'], ['empty', 'is empty']]
+};
+const fieldDef = k => FILTER_FIELDS.find(f => f.key === k) || FILTER_FIELDS[0];
+function filterState() {
+  const u = ui();
+  if (!u.filters || typeof u.filters !== 'object' || !Array.isArray(u.filters.rules)) u.filters = { join: 'AND', rules: [] };
+  if (u.filters.join !== 'OR') u.filters.join = 'AND';
+  u.filters.rules = u.filters.rules.filter(r => r && FILTER_FIELDS.some(f => f.key === r.field));
+  return u.filters;
+}
+function newRule() {
+  return { id: uid(), field: 'tags', op: 'any', v1: '', v2: '' };
+}
+/* Does this rule actually constrain the row set? */
+function ruleActive(rule) {
+  const f = fieldDef(rule.field);
+  if (rule.op === 'empty') return true;
+  if (f.type === 'num') return rule.op === 'between'
+    ? isFinite(parseFloat(rule.v1)) && isFinite(parseFloat(rule.v2))
+    : isFinite(parseFloat(rule.v1));
+  if (f.type === 'tags') return parseTagCell(rule.v1).length > 0;
+  return String(rule.v1 || '').trim() !== '';
+}
+function rowField(r, key) {
+  switch (key) {
+    case 'name': return r.vm.name || '';
+    case 'os': return r.vm.os || '';
+    case 'location': return r.location;
+    case 'ratio': return r.ratioLabel;
+    case 'storage': return shortTier(r.storageLabel);
+    case 'storageCost': return r.storage;
+    case 'drGb': return r.drGb;
+    default: return r[key];
+  }
+}
+function evalRule(r, rule) {
+  const f = fieldDef(rule.field);
+  if (f.type === 'tags') {
+    const have = r.tags.map(t => t.toLowerCase());
+    if (rule.op === 'empty') return have.length === 0;
+    const want = parseTagCell(rule.v1).map(t => t.toLowerCase());
+    if (!want.length) return true;
+    if (rule.op === 'all') return want.every(t => have.includes(t));
+    if (rule.op === 'none') return !want.some(t => have.includes(t));
+    return want.some(t => have.includes(t)); // 'any'
+  }
+  if (f.type === 'num') {
+    const v = Number(rowField(r, rule.field)) || 0;
+    if (rule.op === 'empty') return !v;
+    const a = parseFloat(rule.v1);
+    if (rule.op === 'between') {
+      const b = parseFloat(rule.v2);
+      if (!isFinite(a) || !isFinite(b)) return true;
+      return v >= Math.min(a, b) && v <= Math.max(a, b);
+    }
+    if (!isFinite(a)) return true;
+    const cmp = { eq: v === a, ne: v !== a, gt: v > a, gte: v >= a, lt: v < a, lte: v <= a };
+    return cmp[rule.op] === true;
+  }
+  if (f.type === 'bool') {
+    const on = rule.field === 'drOn' ? r.drOn : !!r.windows;
+    const want = !(String(rule.v1) === 'no');
+    return rule.op === 'is_not' ? on !== want : on === want;
+  }
+  if (f.type === 'select') {
+    const cur = String(rowField(r, rule.field) || '');
+    const want = String(rule.v1 || '');
+    if (!want) return true;
+    const same = cur.toLowerCase() === want.toLowerCase();
+    return rule.op === 'is_not' ? !same : same;
+  }
+  const s = String(rowField(r, rule.field) || '').toLowerCase();
+  if (rule.op === 'empty') return s.trim() === '';
+  const q = String(rule.v1 || '').trim().toLowerCase();
+  if (!q) return true;
+  if (rule.op === 'equals') return s === q;
+  if (rule.op === 'not_contains') return !s.includes(q);
+  if (rule.op === 'starts') return s.startsWith(q);
+  return s.includes(q);
+}
+/* Single source of truth for “what the Cost breakdown is showing”:
+   location selection → filter rules → multi-sort. Table, KPI cards, both
+   roll-ups, the totals row and the “visible results” CSV export all read this. */
+function computeRows() {
+  const all = allCosts();
+  const loc = locFilter === '' ? all : all.filter(r => r.location === locFilter);
+  const F = filterState();
+  const active = F.rules.filter(ruleActive);
+  const filtered = active.length
+    ? loc.filter(r => F.join === 'OR' ? active.some(x => evalRule(r, x)) : active.every(x => evalRule(r, x)))
+    : loc;
+  return { all, loc, rows: filtered.slice().sort(compareRows), active, incomplete: F.rules.length - active.length, join: F.join };
+}
+
+/* Rebuilding the rule rows on every keystroke would steal focus, so the rows are
+   only re-rendered after a structural change (add/remove/clear/field/op/join). */
+let rulesDirty = true;
+function renderFilterUi(V) {
+  const F = filterState();
+  const tags = tagsUsed();
+  $('#filterCountPill').textContent = String(F.rules.length);
+  $$('input[name="filterJoin"]').forEach(r => { r.checked = r.value === F.join; });
+  if (!rulesDirty) { renderFilterSummary(V); return; }
+  rulesDirty = false;
+  $('#ruleList').innerHTML = F.rules.length ? F.rules.map((rule, i) => {
+    const f = fieldDef(rule.field);
+    const ops = FILTER_OPS[f.type];
+    if (!ops.some(o => o[0] === rule.op)) rule.op = ops[0][0];
+    let valHtml;
+    if (rule.op === 'empty') {
+      valHtml = '<span class="rule-note muted small">no value needed</span>';
+    } else if (f.type === 'num') {
+      valHtml = `<input class="in num mono" type="number" step="any" data-rv="1" value="${esc(rule.v1)}" aria-label="Value" placeholder="0">`
+        + (rule.op === 'between' ? `<span class="rule-and">and</span><input class="in num mono" type="number" step="any" data-rv="2" value="${esc(rule.v2)}" aria-label="Upper value" placeholder="0">` : '');
+    } else if (f.type === 'select') {
+      const opts = f.options();
+      valHtml = `<select data-rv="1" aria-label="Value"><option value="">— choose —</option>${opts.map(o => `<option value="${esc(o)}" ${String(rule.v1) === String(o) ? 'selected' : ''}>${esc(o)}</option>`).join('')}</select>`;
+    } else if (f.type === 'bool') {
+      const opts = f.options();
+      if (rule.v1 !== 'yes' && rule.v1 !== 'no') rule.v1 = 'yes'; // keep state in step with the shown default
+      valHtml = `<select data-rv="1" aria-label="Value"><option value="yes" ${rule.v1 !== 'no' ? 'selected' : ''}>${esc(opts[0])}</option><option value="no" ${rule.v1 === 'no' ? 'selected' : ''}>${esc(opts[1])}</option></select>`;
+    } else if (f.type === 'tags') {
+      valHtml = `<input class="in tag-input" data-rv="1" list="tagList" value="${esc(rule.v1)}" aria-label="Tags, separated by ; , or |" placeholder="prod; tier-1" autocomplete="off">`
+        + (tags.length ? `<span class="rule-note muted small">${tags.length} tag${tags.length === 1 ? '' : 's'} in inventory</span>` : '<span class="rule-note muted small">no tags yet</span>');
+    } else {
+      valHtml = `<input class="in" data-rv="1" value="${esc(rule.v1)}" aria-label="Value" placeholder="text…">`;
+    }
+    return `<div class="rule" data-rid="${rule.id}">
+      <span class="rule-join mono">${i === 0 ? 'Where' : (F.join === 'OR' ? 'or' : 'and')}</span>
+      <select data-rf="field" aria-label="Field for rule ${i + 1}">${FILTER_FIELDS.map(x => `<option value="${x.key}" ${x.key === rule.field ? 'selected' : ''}>${esc(x.label)}</option>`).join('')}</select>
+      <select data-rf="op" aria-label="Operator for rule ${i + 1}">${ops.map(o => `<option value="${o[0]}" ${o[0] === rule.op ? 'selected' : ''}>${esc(o[1])}</option>`).join('')}</select>
+      <span class="rule-val">${valHtml}</span>
+      <button class="btn icon rule-x" data-rdel aria-label="Remove rule ${i + 1}" title="Remove this rule">✕</button>
+    </div>`;
+  }).join('') : '<p class="muted small no-rules">No rules yet — add one to narrow the table. The location selector above still applies on its own.</p>';
+  renderFilterSummary(V);
+}
+function renderFilterSummary(V) {
+  const parts = [];
+  parts.push(`<strong>${V.rows.length}</strong> of ${V.all.length} VM${V.all.length === 1 ? '' : 's'} shown`);
+  parts.push(locFilter ? `location: ${esc(locFilter)}` : 'all locations');
+  parts.push(V.active.length ? `${V.active.length} active rule${V.active.length === 1 ? '' : 's'} (${V.join})` : 'no active rules');
+  if (V.incomplete) parts.push(`${V.incomplete} incomplete rule${V.incomplete === 1 ? '' : 's'} ignored`);
+  parts.push(`sort: ${esc(sortSummaryText())}`);
+  $('#filterSummary').innerHTML = parts.join(' · ');
+}
+
+/* ================= Cost breakdown: row selection + bulk tagging ================= */
+function renderSelBar(V) {
+  const visibleIds = V.rows.map(r => r.vm.id);
+  const live = new Set(VMS().map(v => v.id));
+  Array.from(selected).forEach(id => { if (!live.has(id)) selected.delete(id); }); // deleted VMs drop out
+  const n = selected.size;
+  const hidden = Array.from(selected).filter(id => !visibleIds.includes(id)).length;
+  $('#selCount').textContent = `${n} VM${n === 1 ? '' : 's'} selected`;
+  $('#selHidden').textContent = n
+    ? (hidden ? `${hidden} of them ${hidden === 1 ? 'is' : 'are'} hidden by the current filters — tag actions still apply to all ${n}.` : 'all selected rows are visible')
+    : 'Tick rows in the table, or use “Select all visible”.';
+  ['#btnTagAdd', '#btnTagRemove', '#btnTagReplace', '#btnSelClear'].forEach(s => { $(s).disabled = n === 0; });
+  const all = $('#selAll');
+  const visSel = visibleIds.filter(id => selected.has(id)).length;
+  all.checked = visibleIds.length > 0 && visSel === visibleIds.length;
+  all.indeterminate = visSel > 0 && visSel < visibleIds.length;
+}
+
 /* ================= RENDER: results ================= */
 function renderResults() {
   const all = allCosts();
   renderLocationFilter(all);
-  const rows = locFilter === '' ? all : all.filter(r => r.location === locFilter);
+  const V = computeRows();
+  const rows = V.rows;
   const has = all.length > 0;
+  $('#filterPanel').hidden = !has;
+  $('#selBar').hidden = !has;
   $('#resEmpty').hidden = has;
   $('#resTable').hidden = !has;
   $('#tierRollup').hidden = !has;
   $('#locRollup').hidden = !has;
   $('#locFilterBar').hidden = !has;
   $('#summaryCards').innerHTML = '';
-  if (!has) { $('#resultsSub').textContent = 'Monthly recurring cost per VM.'; return; }
+  if (!has) {
+    $('#resultsSub').textContent = 'Monthly recurring cost per VM.';
+    selected.clear();
+    return;
+  }
+  renderFilterUi(V);
+  renderSelBar(V);
 
   const T = rows.reduce((a, r) => ({
     compute: a.compute + r.compute, vmware: a.vmware + r.vmware, storage: a.storage + r.storage,
@@ -407,9 +788,12 @@ function renderResults() {
   }), { compute: 0, vmware: 0, storage: 0, spla: 0, addons: 0, dr: 0, total: 0, ram: 0, disk: 0, drGb: 0, drVms: 0 });
   const winCount = rows.filter(r => r.windows).length;
 
-  $('#resultsSub').textContent = `${rows.length} VM${rows.length === 1 ? '' : 's'} · ${active().name}`
+  const narrowed = rows.length !== all.length;
+  $('#resultsSub').textContent = `${rows.length}${narrowed ? ` of ${all.length}` : ''} VM${rows.length === 1 ? '' : 's'} · ${active().name}`
     + (locFilter ? ` · location: ${locFilter}` : ` · ${locationsAll(all).length} location${locationsAll(all).length === 1 ? '' : 's'}`)
-    + ' · monthly recurring, USD';
+    + (V.active.length ? ` · ${V.active.length} filter rule${V.active.length === 1 ? '' : 's'} (${V.join})` : '')
+    + ' · monthly recurring, USD'
+    + (narrowed ? ' · KPIs, totals and roll-ups below cover the visible rows only' : '');
 
   $('#summaryCards').innerHTML = `
     ${kpi('Total VMs', rows.length, `${winCount} Windows · ${rows.length - winCount} non-Windows`)}
@@ -417,19 +801,18 @@ function renderResults() {
     ${kpi('Total disk', num(T.disk) + ' GB', num(T.disk / P().settings.divisor) + ' TB @ ÷' + P().settings.divisor)}
     ${kpi('Zerto DR', usd(T.dr), `${T.drVms} of ${rows.length} protected · ${num(T.drGb)} DR GB`)}
     ${kpi('Monthly cost', usd(T.total), usd(T.total * 12) + ' / yr', true)}
-    ${kpi('Avg cost / VM', usd(T.total / rows.length), 'across all tiers')}`;
+    ${kpi('Avg cost / VM', rows.length ? usd(T.total / rows.length) : '—', rows.length ? 'across visible rows' : 'no rows match')}`;
 
-  const dir = sort.dir === 'asc' ? 1 : -1;
-  const key = sort.key;
-  const val = r => ({ name: r.vm.name.toLowerCase(), os: String(r.vm.os).toLowerCase(), location: r.location.toLowerCase(), ram: r.ram, disk: r.disk, ratio: r.ratioLabel, storage: r.storageLabel, compute: r.compute, vmware: r.vmware, storageCost: r.storage, spla: r.spla, addons: r.addons, dr: r.dr, total: r.total }[key]);
-  const sorted = rows.slice().sort((a, a2) => { const x = val(a), y = val(a2); return (typeof x === 'string' ? x.localeCompare(y) : x - y) * dir; });
-
-  $('#resTable tbody').innerHTML = sorted.map((r, i) => `
-    <tr>
-      <td class="w-idx mono stick stick-1">${i + 1}</td>
-      <td class="txt strong stick stick-2 stick-edge" title="${esc(r.vm.name || '(unnamed)')}">${esc(r.vm.name || '(unnamed)')}</td>
+  const sorted = rows;
+  const COLSPAN = 18;
+  $('#resTable tbody').innerHTML = sorted.length ? sorted.map((r, i) => `
+    <tr${selected.has(r.vm.id) ? ' class="rowsel-on"' : ''}>
+      <td class="w-sel stick stick-1"><input type="checkbox" class="rowsel" data-id="${r.vm.id}" ${selected.has(r.vm.id) ? 'checked' : ''} aria-label="Select ${esc(r.vm.name || '(unnamed)')} for bulk tagging"></td>
+      <td class="w-idx mono stick stick-2">${i + 1}</td>
+      <td class="txt strong stick stick-3 stick-edge" title="${esc(r.vm.name || '(unnamed)')}">${esc(r.vm.name || '(unnamed)')}</td>
       <td class="txt"><span class="os-tag ${r.windows ? 'win' : /linux|ubuntu|centos|rhel|red hat|debian|suse/i.test(r.vm.os) ? 'lin' : ''}">${esc(r.vm.os || '—')}</span></td>
       <td class="txt loc${r.location === UNASSIGNED ? ' unassigned' : ''}" title="${esc(r.location)}">${esc(r.location)}</td>
+      <td class="txt tags-cell" title="${r.tags.length ? esc(r.tags.join(', ')) : 'No tags'}">${r.tags.length ? r.tags.map(t => `<span class="tag-chip ro">${esc(t)}</span>`).join('') : '<span class="muted">—</span>'}</td>
       <td class="num">${num(r.ram)}</td>
       <td class="num">${num(r.disk)}</td>
       <td class="txt">${esc(r.ratioLabel)}</td>
@@ -439,26 +822,28 @@ function renderResults() {
       <td class="num${r.storage ? '' : ' zero'}">${usd(r.storage)}</td>
       <td class="num${r.spla ? '' : ' zero'}">${usd(r.spla)}</td>
       <td class="num${r.addons ? '' : ' zero'}">${usd(r.addons)}</td>
+      <td class="txt w-drs"><span class="st-tag${r.drOn ? ' on' : ''}">${r.drOn ? 'Protected' : 'No DR'}</span></td>
       <td class="num${r.dr ? '' : ' zero'}"${r.drOn ? ` title="${num(r.drGb)} DR GB × $${drRateNum(drRate(P()))}/GB + ${usd(drFeeRate(P()))} fee"` : ' title="Not Zerto-protected"'}>${usd(r.dr)}</td>
       <td class="num total">${usd(r.total)}</td>
       <td class="spacer"></td>
-    </tr>`).join('');
+    </tr>`).join('')
+    : `<tr class="no-match"><td colspan="${COLSPAN}">No VMs match the current location and filter rules. Adjust or clear the rules above.</td><td class="spacer"></td></tr>`;
 
   $('#resTable tfoot').innerHTML = `<tr>
-      <td class="label stick stick-1 stick-edge" colspan="2">Total · ${rows.length} VMs</td>
-      <td class="label" colspan="2">${locFilter ? esc(locFilter) + ' subtotal' : 'Grand total'}</td>
+      <td class="label stick stick-1 stick-edge" colspan="3">Total · ${rows.length} VM${rows.length === 1 ? '' : 's'} shown</td>
+      <td class="label" colspan="2">${locFilter ? esc(locFilter) + ' subtotal' : (V.active.length ? 'Filtered total' : 'Grand total')}</td>
+      <td></td>
       <td class="num">${num(T.ram)}</td><td class="num">${num(T.disk)}</td>
       <td colspan="2"></td>
       <td class="num">${usd(T.compute)}</td><td class="num">${usd(T.vmware)}</td><td class="num">${usd(T.storage)}</td>
-      <td class="num">${usd(T.spla)}</td><td class="num">${usd(T.addons)}</td><td class="num">${usd(T.dr)}</td>
+      <td class="num">${usd(T.spla)}</td><td class="num">${usd(T.addons)}</td>
+      <td class="txt w-drs label">${T.drVms} on</td>
+      <td class="num">${usd(T.dr)}</td>
       <td class="num" style="color:var(--primary)">${usd(T.total)}</td>
       <td class="spacer"></td>
     </tr>`;
 
-  $$('#resTable th[data-sort]').forEach(th => {
-    th.classList.toggle('sorted', th.dataset.sort === key);
-    th.classList.toggle('asc', th.dataset.sort === key && sort.dir === 'asc');
-  });
+  renderSortIndicators();
 
   $('#resStorageNote').textContent = 'Storage: ' + storageUnitSummary(P()) + '. Zerto DR: ' + drSummary(P())
     + ` · ${T.drVms} protected VM${T.drVms === 1 ? '' : 's'}.`;
@@ -466,6 +851,7 @@ function renderResults() {
 
   renderRollup(rows);
   renderLocationRollup(rows);
+  syncTagDatalist();
   syncColW();
 }
 const locationsAll = rows => Array.from(new Set(rows.map(r => r.location))).sort(locSort);
@@ -580,7 +966,7 @@ function renderClients() {
     .sort((a, b) => a.name.localeCompare(b.name))
     .map(c => `<option value="${c.id}" ${c.id === state.activeId ? 'selected' : ''}>${esc(c.name)} (${c.vms.length} VM${c.vms.length === 1 ? '' : 's'})</option>`).join('');
 }
-function renderAll() { renderChrome(); renderPricing(); renderVms(); renderResults(); }
+function renderAll() { rulesDirty = true; renderChrome(); renderPricing(); renderVms(); renderResults(); }
 
 /* ================= reactivity core =================
    Single source of truth is `state`. Every tab re-renders from state when it
@@ -626,9 +1012,11 @@ function reconcileVmTiers() {
 
 /* ================= results table: resizable + frozen columns =================
    Widths live in <col> elements (cheap, no per-cell writes) and persist per
-   client profile. The first two columns (# and Name) are position:sticky, so
-   the sticky offset of column 2 tracks the live width of column 1. */
-const COLW_MIN = i => (i === 0 ? 34 : i === 1 ? 120 : 56);
+   client profile. The first three columns (select checkbox, # and Name) are
+   position:sticky, so the sticky offset of column 2 tracks column 1's live
+   width and column 3's offset tracks columns 1 + 2. */
+/* select box, #, Name, Tags (chips need room or every row grows three lines tall) */
+const COLW_MIN = i => (i === 0 ? 44 : i === 1 ? 34 : i === 2 ? 120 : i === 5 ? 150 : 56);
 const COLW_MAX = 720;
 let suppressSort = false;
 const resCols = () => $$('#resTable colgroup col:not(.spacer)');
@@ -646,6 +1034,7 @@ function applyColW(w) {
   t.style.width = '100%';
   t.style.minWidth = w.reduce((a, n) => a + n, 0) + 'px';
   t.style.setProperty('--stick-1w', w[0] + 'px');
+  t.style.setProperty('--stick-2w', w[1] + 'px');
 }
 /* Natural (content-driven) widths: drop the fixed layout, let the browser lay
    the table out, then read each header cell back. */
@@ -655,8 +1044,12 @@ function measureColW() {
   t.classList.remove('cols-fixed');
   t.style.width = ''; t.style.minWidth = '';
   resCols().forEach(c => { c.style.width = ''; });
-  const w = resHeads().map((th, i) =>
-    Math.min(COLW_MAX, Math.max(COLW_MIN(i), Math.ceil(th.getBoundingClientRect().width) + 2)));
+  /* Reserve room for the sort arrow + priority number on every sortable header,
+     otherwise a column clips its own label the moment it joins the sort. */
+  const w = resHeads().map((th, i) => {
+    const pad = th.querySelector('.th-sort') ? 30 : 2;
+    return Math.min(COLW_MAX, Math.max(COLW_MIN(i), Math.ceil(th.getBoundingClientRect().width) + pad));
+  });
   t.style.width = prevW; t.style.minWidth = prevMin;
   return w;
 }
@@ -746,11 +1139,12 @@ function download(filename, text, mime) {
   document.body.appendChild(a); a.click(); a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 1500);
 }
-const SAMPLE_CSV = `Name,OS,Location,RAM_GB,Disk_GB,Zerto,DR_Storage_GB,Ratio,StorageTier
-WEB01,Microsoft Windows Server 2022,Columbus - DUB,16,200,yes,250,4:1,Standard Flash
-SQL01,Microsoft Windows Server 2019,Columbus - DUB,64,1024,yes,1200,2:1,High Performance Flash
-APP01,Ubuntu Linux 22.04,Indianapolis - 701 Congressional,32,500,no,,4:1,Standard Flash
-FILE01,Microsoft Windows Server 2022,Indianapolis - 701 Congressional,8,1500,no,,4:1,Standard Flash
+/* Tags column uses the canonical semicolon delimiter inside one quoted cell. */
+const SAMPLE_CSV = `Name,OS,Location,RAM_GB,Disk_GB,Zerto,DR_Storage_GB,Ratio,StorageTier,Tags
+WEB01,Microsoft Windows Server 2022,Columbus - DUB,16,200,yes,250,4:1,Standard Flash,"prod;web;tier-1"
+SQL01,Microsoft Windows Server 2019,Columbus - DUB,64,1024,yes,1200,2:1,High Performance Flash,"prod;database;tier-1"
+APP01,Ubuntu Linux 22.04,Indianapolis - 701 Congressional,32,500,no,,4:1,Standard Flash,"prod;app"
+FILE01,Microsoft Windows Server 2022,Indianapolis - 701 Congressional,8,1500,no,,4:1,Standard Flash,"archive;file-services"
 `;
 
 /* CSV DR flag parsing: accept the common truthy spellings used in inventory exports */
@@ -773,7 +1167,9 @@ const FIELDS = [
     avoid: /\b(gb|mb|tb|gib|mib|tib)\b|size|capacity|journal|replica/ },
   { key: 'drGb', label: 'DR storage (optional)', req: false, hints: ['dr gb', 'dr storage', 'dr storage gb', 'zerto gb', 'journal', 'journal gb', 'replica', 'replica gb', 'dr size', 'replication gb', 'dr capacity'] },
   { key: 'ratio', label: 'Ratio tier (optional)', req: false, hints: ['ratio', 'ratio tier', 'processor ratio', 'tier', 'compute tier'] },
-  { key: 'storage', label: 'Storage tier (optional)', req: false, hints: ['storagetier', 'storage tier', 'storage_tier', 'datastore', 'storage policy', 'storage profile', 'policy'] }
+  { key: 'storage', label: 'Storage tier (optional)', req: false, hints: ['storagetier', 'storage tier', 'storage_tier', 'datastore', 'storage policy', 'storage profile', 'policy'] },
+  /* One cell may hold several tags separated by ; , or | — see parseTagCell(). */
+  { key: 'tags', label: 'Tags (optional)', req: false, hints: ['tags', 'tag', 'labels', 'label', 'categories', 'category', 'tag list', 'custom attributes', 'annotation'] }
 ];
 
 function autoMap(headers) {
@@ -904,6 +1300,7 @@ function buildImport() {
       drGb: drOn ? drGb : 0,
       ratioId: rt ? rt.id : fbR,
       storageId: st ? st.id : fbS,
+      tags: m.tags ? parseTagCell(row[m.tags]) : [],
       addons: p.addons.filter(a => a.defaultOn).map(a => a.id)
     };
 
@@ -919,6 +1316,9 @@ function buildImport() {
     else if (m.drGb && isFinite(drGbRaw)) { patch.dr = drOn; patch.drGb = drOn ? drGb : 0; }
     if (rt) patch.ratioId = rt.id;
     if (st) patch.storageId = st.id;
+    /* Tags: a blank cell means “no tag data for this row”, so existing tags survive.
+       A populated cell replaces the VM's tag list (predictable and round-trips). */
+    if (m.tags && String(row[m.tags] ?? '').trim() !== '') patch.tags = parseTagCell(row[m.tags]);
 
     vms.push(full);
     entries.push({ row: i + 2, name, full, patch, fields: Object.keys(patch) });
@@ -991,7 +1391,7 @@ function refreshPreview() {
      rows that update an existing VM show “unchanged” for every unmapped field */
   const isAdd = e => !!plan && plan.adds.includes(e);
   const cell = (e, field, html) => (merge && !isAdd(e) && !e.fields.includes(field)) ? unchanged : html;
-  const head = (merge ? ['Action'] : []).concat(['Name', 'OS', 'Location', 'RAM GB', 'Disk GB', 'Zerto DR', 'DR GB', 'Ratio', 'Storage tier']);
+  const head = (merge ? ['Action'] : []).concat(['Name', 'OS', 'Location', 'RAM GB', 'Disk GB', 'Zerto DR', 'DR GB', 'Ratio', 'Storage tier', 'Tags']);
   const action = e => {
     if (!e.name) return '<span class="tag skip">skip</span>';
     const hit = (plan.updates.find(u => nameKey(u.entry.name) === nameKey(e.name)) || {});
@@ -1012,7 +1412,8 @@ function refreshPreview() {
       <td class="${v.dr ? 'mono' : 'unassigned'}">${cell(e, 'dr', v.dr ? 'yes' : 'no')}</td>
       <td class="num mono">${cell(e, 'drGb', v.dr ? num(v.drGb) : '<span class="dash">—</span>')}</td>
       <td>${cell(e, 'ratioId', esc((P().ratios.find(r => r.id === v.ratioId) || {}).label || '—'))}</td>
-      <td>${cell(e, 'storageId', esc(shortTier((P().storage.find(s => s.id === v.storageId) || {}).name || '—')))}</td></tr>`;
+      <td>${cell(e, 'storageId', esc(shortTier((P().storage.find(s => s.id === v.storageId) || {}).name || '—')))}</td>
+      <td>${cell(e, 'tags', (v.tags || []).length ? (v.tags || []).map(t => `<span class="tag-chip ro">${esc(t)}</span>`).join('') : '<span class="dash">—</span>')}</td></tr>`;
   }).join('');
   $('#mapPreview thead').innerHTML = `<tr>${head.map(h => `<th>${h}</th>`).join('')}</tr>`;
   $('#mapPreview tbody').innerHTML = rows || `<tr><td colspan="${head.length}" class="muted">No importable rows with the current mapping.</td></tr>`;
@@ -1066,23 +1467,48 @@ function renderImportSummary() {
   box.hidden = false;
 }
 
-function exportResultsCsv() {
+/* ---------------- CSV export (scope-aware) ----------------
+   scope 'visible' = exactly the rows the Cost breakdown is showing (location +
+   filter rules, in the current multi-sort order).
+   scope 'all'     = every VM in the profile, in inventory order, ignoring the
+                     location selector, filter rules and sort. */
+function openExportModal() {
+  if (!VMS().length) return toast('No VMs to export.', true);
+  const V = computeRows();
+  const vis = $('input[name="exportScope"][value="visible"]');
+  $('#scopeVisibleInfo').textContent = `${V.rows.length} row${V.rows.length === 1 ? '' : 's'} · `
+    + (locFilter ? `location: ${locFilter}` : 'all locations')
+    + ` · ${V.active.length} active rule${V.active.length === 1 ? '' : 's'} (${V.join}) · sorted by ${sortSummaryText()}`;
+  $('#scopeAllInfo').textContent = `${VMS().length} VM${VMS().length === 1 ? '' : 's'} · inventory order · ignores the location selector, filter rules and sort`;
+  vis.disabled = V.rows.length === 0;
+  if (V.rows.length === 0) $('input[name="exportScope"][value="all"]').checked = true;
+  else vis.checked = true;
+  $('#exportModal').hidden = false;
+  $('#btnExportGo').focus();
+}
+function exportScope() {
+  const el = $('input[name="exportScope"]:checked');
+  return el && el.value === 'all' ? 'all' : 'visible';
+}
+function exportResultsCsv(scope) {
+  scope = scope === 'all' ? 'all' : 'visible';
   const all = allCosts();
-  const rows = locFilter === '' ? all : all.filter(r => r.location === locFilter);
+  const V = computeRows();
+  const rows = scope === 'all' ? all : V.rows;
   if (!rows.length) return toast('No VMs to export.', true);
   const p = P();
-  const head = ['Name', 'OS', 'Location', 'RAM_GB', 'Disk_GB', 'Disk_TB', 'RatioTier', 'RatioRate_perGB', 'StorageTier', 'StorageUnit', 'StorageBilledQty', 'StorageRate_perUnit',
+  const head = ['Name', 'OS', 'Location', 'Tags', 'RAM_GB', 'Disk_GB', 'Disk_TB', 'RatioTier', 'RatioRate_perGB', 'StorageTier', 'StorageUnit', 'StorageBilledQty', 'StorageRate_perUnit',
     'ZertoDR', 'DRStorage_GB', 'Compute_USD', 'VMwareLicensing_USD', 'Storage_USD', 'WindowsSPLA_USD', 'Addons_USD', 'DR_USD', 'TotalMonthly_USD'];
   const lines = [head];
   rows.forEach(r => lines.push([
-    r.vm.name, r.vm.os, r.location, r.ram, r.disk, r2(r.tb), r.ratioLabel, r.ratio ? r.ratio.price : 0,
+    r.vm.name, r.vm.os, r.location, r.tags.join(TAG_DELIM), r.ram, r.disk, r2(r.tb), r.ratioLabel, r.ratio ? r.ratio.price : 0,
     shortTier(r.storageLabel), r.storageUnit, r2(r.storageQty), r.storageTier ? r.storageTier.price : 0,
     r.drOn ? 'yes' : 'no', r2(r.drGb),
     r2(r.compute), r2(r.vmware), r2(r.storage), r2(r.spla), r2(r.addons), r2(r.dr), r2(r.total)
   ]));
   const T = rows.reduce((a, r) => [a[0] + r.ram, a[1] + r.disk, a[2] + r.compute, a[3] + r.vmware, a[4] + r.storage, a[5] + r.spla, a[6] + r.addons, a[7] + r.total, a[8] + r.dr, a[9] + r.drGb, a[10] + (r.drOn ? 1 : 0)], [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
   lines.push([]);
-  lines.push(['TOTAL (' + rows.length + ' VMs)', '', '', T[0], T[1], r2(T[1] / p.settings.divisor), '', '', '', '', '', '', T[10] + ' protected', r2(T[9]), r2(T[2]), r2(T[3]), r2(T[4]), r2(T[5]), r2(T[6]), r2(T[8]), r2(T[7])]);
+  lines.push(['TOTAL (' + rows.length + ' VMs)', '', '', '', T[0], T[1], r2(T[1] / p.settings.divisor), '', '', '', '', '', '', T[10] + ' protected', r2(T[9]), r2(T[2]), r2(T[3]), r2(T[4]), r2(T[5]), r2(T[6]), r2(T[8]), r2(T[7])]);
 
   // --- location summary block ---
   const groups = locationTotals(rows);
@@ -1101,9 +1527,32 @@ function exportResultsCsv() {
   lines.push([p.dr.fee.sku || '', p.dr.fee.name, T[10] + ' protected VMs', usd(drFeeRate(p)) + ' per VM',
     r2(rows.reduce((a, r) => a + r.drFee, 0))]);
 
+  // --- tag roll-up (tags present in the exported set) ---
+  const tc = tagCounts(rows.map(r => r.vm));
+  if (tc.size) {
+    const label = new Map();
+    rows.forEach(r => r.tags.forEach(t => { if (!label.has(t.toLowerCase())) label.set(t.toLowerCase(), t); }));
+    lines.push([]);
+    lines.push(['COST BY TAG (a VM with several tags counts once per tag — rows do not sum to the grand total)']);
+    lines.push(['Tag', 'VMs', 'TotalMonthly_USD']);
+    Array.from(tc.keys()).sort((a, b) => a.localeCompare(b)).forEach(k => {
+      const set = rows.filter(r => r.tags.some(t => t.toLowerCase() === k));
+      lines.push([label.get(k) || k, set.length, r2(set.reduce((a, r) => a + r.total, 0))]);
+    });
+    const untagged = rows.filter(r => !r.tags.length);
+    lines.push(['(untagged)', untagged.length, r2(untagged.reduce((a, r) => a + r.total, 0))]);
+  }
+
   lines.push([]);
   lines.push(['Client', active().name]);
-  lines.push(['Location filter', locFilter || 'All locations']);
+  lines.push(['Export scope', scope === 'all'
+    ? `All inventory (${rows.length} VMs) — location selector, filter rules and sort not applied`
+    : `Current visible results (${rows.length} of ${all.length} VMs) — filters and sort applied`]);
+  lines.push(['Location filter', scope === 'all' ? 'not applied (all inventory)' : (locFilter || 'All locations')]);
+  lines.push(['Filter rules', scope === 'all' ? 'not applied (all inventory)'
+    : (V.active.length ? `${V.join} · ` + V.active.map(describeRule).join(' · ') : 'none')]);
+  lines.push(['Sort order', scope === 'all' ? 'inventory order' : sortSummaryText()]);
+  lines.push(['Tags delimiter', `“${TAG_DELIM}” within the Tags cell (import also accepts , and |)`]);
   lines.push(['Generated', new Date().toLocaleString()]);
   lines.push(['GB to TB divisor', p.settings.divisor]);
   lines.push(['Storage pricing basis', storageUnitSummary(p)]);
@@ -1117,9 +1566,120 @@ function exportResultsCsv() {
     if (/^[=+\-@]/.test(s) && isNaN(Number(s))) s = "'" + s;
     return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
   }).join(',')).join('\r\n');
-  const slug = active().name.replace(/[^a-z0-9]+/gi, '-').toLowerCase();
-  download(`vm-costs-${slug}-${new Date().toISOString().slice(0, 10)}.csv`, csv);
-  toast('Results exported as CSV.');
+  const slug = (active().name.replace(/[^a-z0-9]+/gi, '-').toLowerCase().replace(/^-|-$/g, '') || 'client');
+  download(`vm-costs-${slug}-${new Date().toISOString().slice(0, 10)}-${scope === 'all' ? 'all-inventory' : 'visible'}.csv`, csv);
+  toast(scope === 'all'
+    ? `Exported all ${rows.length} VM${rows.length === 1 ? '' : 's'} (full inventory).`
+    : `Exported ${rows.length} visible row${rows.length === 1 ? '' : 's'} in the current sort order.`);
+}
+/* Plain-English rule text used in the export summary block. */
+function describeRule(rule) {
+  const f = fieldDef(rule.field);
+  const opLabel = (FILTER_OPS[f.type].find(o => o[0] === rule.op) || [rule.op, rule.op])[1];
+  if (rule.op === 'empty') return `${f.label} is empty`;
+  if (f.type === 'bool') return `${f.label} ${opLabel} ${(f.options()[String(rule.v1) === 'no' ? 1 : 0])}`;
+  if (rule.op === 'between') return `${f.label} between ${rule.v1} and ${rule.v2}`;
+  return `${f.label} ${opLabel} ${rule.v1}`;
+}
+
+/* ================= bulk tag modal =================
+   One modal serves all three actions. Replace is destructive, so it requires an
+   explicit in-modal confirmation checkbox before Apply enables — no separate
+   browser confirm dialog. */
+let tagMode = null; // 'add' | 'remove' | 'replace'
+let tagDraft = [];
+function selectedVms() {
+  return VMS().filter(v => selected.has(v.id));
+}
+function openTagModal(mode) {
+  const targets = selectedVms();
+  if (!targets.length) return toast('Select at least one row first.', true);
+  tagMode = mode; tagDraft = [];
+  const n = targets.length;
+  const titles = { add: 'Add tags', remove: 'Remove tags', replace: 'Replace all tags' };
+  const subs = {
+    add: `Tags you list here are added to the ${n} selected VM${n === 1 ? '' : 's'}. Existing tags are kept.`,
+    remove: `Tags you list here are removed from the ${n} selected VM${n === 1 ? '' : 's'} if present. Other tags are kept.`,
+    replace: `Every existing tag on the ${n} selected VM${n === 1 ? '' : 's'} is discarded and replaced with exactly the list below. Leave the list empty to clear all their tags.`
+  };
+  $('#tagModalTitle').textContent = `${titles[mode]} · ${n} VM${n === 1 ? '' : 's'}`;
+  $('#tagModalSub').textContent = subs[mode];
+  $('#tagModalInputLabel').textContent = mode === 'remove' ? 'Tags to remove' : 'Tags to apply';
+  $('#tagReplaceNote').hidden = mode !== 'replace';
+  $('#tagReplaceConfirm').checked = false;
+  $('#tagReplaceText').textContent = `Yes — discard the current tags on ${n === 1 ? 'this VM' : `these ${n} VMs`} and use only the list above.`;
+  $('#tagModal').hidden = false;
+  renderTagModal();
+  $('#tagModalInput').focus();
+}
+function closeTagModal() { $('#tagModal').hidden = true; tagMode = null; tagDraft = []; }
+function renderTagModal() {
+  const targets = selectedVms();
+  const n = targets.length;
+  $('#tagModalBox').innerHTML = tagDraft.map(t =>
+    `<span class="tag-chip">${esc(t)}<button type="button" class="chip-x" data-draftdel="${esc(t)}" aria-label="Remove ${esc(t)} from the list">✕</button></span>`).join('')
+    || '<span class="muted small">No tags listed yet.</span>';
+  // suggestions: for remove, only tags actually on the selection; otherwise the whole inventory
+  const pool = tagMode === 'remove' ? tagsUsed(targets) : tagsUsed();
+  const counts = tagCounts(tagMode === 'remove' ? targets : VMS());
+  const left = pool.filter(t => !tagDraft.some(d => d.toLowerCase() === t.toLowerCase()));
+  $('#tagModalSuggest').innerHTML = left.length
+    ? `<span class="muted small">Reused from inventory:</span> ` + left.slice(0, 20).map(t =>
+      `<button type="button" class="btn tag-sug" data-sug="${esc(t)}">${esc(t)} <span class="muted">· ${counts.get(t.toLowerCase()) || 0}</span></button>`).join('')
+    : '<span class="muted small">No further suggestions.</span>';
+
+  let preview;
+  if (tagMode === 'remove') {
+    const hits = targets.filter(v => tagsOf(v).some(t => tagDraft.some(d => d.toLowerCase() === t.toLowerCase())));
+    preview = tagDraft.length ? `${hits.length} of ${n} selected VM${n === 1 ? '' : 's'} carr${hits.length === 1 ? 'ies' : 'y'} at least one of these tags.` : 'List one or more tags to remove.';
+  } else if (tagMode === 'replace') {
+    preview = tagDraft.length
+      ? `All ${n} selected VM${n === 1 ? '' : 's'} will end up with exactly: ${tagDraft.join(', ')}.`
+      : `All tags will be cleared from the ${n} selected VM${n === 1 ? '' : 's'}.`;
+  } else {
+    const ex = targets[0];
+    preview = tagDraft.length
+      ? `Example — ${esc(ex.name || '(unnamed)')} would become: ${normalizeTagList([...tagsOf(ex), ...tagDraft]).tags.join(', ')}.`
+      : 'List one or more tags to add.';
+  }
+  $('#tagModalPreview').innerHTML = preview;
+
+  const needConfirm = tagMode === 'replace' && !$('#tagReplaceConfirm').checked;
+  const labels = { add: 'Add tags', remove: 'Remove tags', replace: tagDraft.length ? 'Replace tags' : 'Clear all tags' };
+  $('#btnTagApply').textContent = `${labels[tagMode]} on ${n} VM${n === 1 ? '' : 's'}`;
+  $('#btnTagApply').disabled = needConfirm || (tagMode !== 'replace' && !tagDraft.length);
+}
+function addDraftTags(raw) {
+  const res = normalizeTagList([...tagDraft, ...String(raw).split(TAG_SPLIT)]);
+  if (res.dropped.length) toast(`“${res.dropped[0].tag.slice(0, 40)}” skipped — ${res.dropped[0].why}.`, true);
+  tagDraft = res.tags;
+  $('#tagModalInput').value = '';
+  renderTagModal();
+}
+function applyTagAction() {
+  const targets = selectedVms();
+  if (!targets.length) return closeTagModal();
+  const draftKeys = tagDraft.map(t => t.toLowerCase());
+  let changed = 0, over = 0;
+  targets.forEach(v => {
+    const before = tagsOf(v).join('\u0001').toLowerCase();
+    if (tagMode === 'add') {
+      const res = normalizeTagList([...tagsOf(v), ...tagDraft]);
+      if (res.dropped.some(d => /limit/.test(d.why))) over++;
+      v.tags = res.tags;
+    } else if (tagMode === 'remove') {
+      v.tags = tagsOf(v).filter(t => !draftKeys.includes(t.toLowerCase()));
+    } else {
+      v.tags = normalizeTagList(tagDraft).tags;
+    }
+    if (v.tags.join('\u0001').toLowerCase() !== before) changed++;
+  });
+  const verb = { add: 'tagged', remove: 'untagged', replace: 'retagged' }[tagMode];
+  closeTagModal();
+  commit('inventory');
+  toast(changed
+    ? `${changed} VM${changed === 1 ? '' : 's'} ${verb}.` + (over ? ` ${over} hit the ${TAG_MAX_PER_VM}-tag limit.` : '')
+    : 'No VM needed a change.');
 }
 
 /* ================= events ================= */
@@ -1228,8 +1788,27 @@ function initEvents() {
     }
     commit('inventory');
   });
+  // per-VM tag chips: Enter / , ; | commits, Backspace on an empty input pops the last chip
+  vmt.addEventListener('keydown', e => {
+    const inp = e.target.closest('.tag-input'); if (!inp) return;
+    if (e.key === 'Enter' || e.key === ',' || e.key === ';' || e.key === '|') {
+      e.preventDefault(); commitRowTagInput(inp); return;
+    }
+    if (e.key === 'Backspace' && inp.value === '') {
+      const tr = inp.closest('tr[data-id]');
+      const vm = tr && VMS().find(v => v.id === tr.dataset.id);
+      const last = vm && tagsOf(vm).slice(-1)[0];
+      if (last) { e.preventDefault(); removeRowTag(tr, last); }
+    }
+  });
+  vmt.addEventListener('focusout', e => {
+    const inp = e.target.closest('.tag-input');
+    if (inp && cleanTag(inp.value)) commitRowTagInput(inp); // don't silently discard typed text
+  });
   vmt.addEventListener('click', e => {
     const tr = e.target.closest('tr[data-id]'); if (!tr) return;
+    const chipX = e.target.closest('[data-tagdel]');
+    if (chipX) { removeRowTag(tr, chipX.dataset.tagdel); return; }
     const i = VMS().findIndex(v => v.id === tr.dataset.id); if (i < 0) return;
     if (e.target.closest('[data-del]')) { VMS().splice(i, 1); renderVms(); commit('inventory'); }
     else if (e.target.closest('[data-dup]')) {
@@ -1268,17 +1847,146 @@ function initEvents() {
     renderVms(); commit('inventory');
     toast(on ? 'Zerto DR enabled on all VMs.' : 'Zerto DR disabled on all VMs.');
   });
+  /* Location change keeps the selection intact — the selection bar reports how
+     many selected rows are currently hidden. */
   $('#locFilter').addEventListener('change', e => { locFilter = e.target.value; renderResults(); });
 
-  // results sorting / export
-  $$('#resTable th[data-sort]').forEach(th => th.addEventListener('click', () => {
+  /* ---- multi-column sort: header buttons are real <button>s, so Enter/Space and
+     Shift+Enter work from the keyboard exactly like click / Shift-click ---- */
+  $('#resTable thead').addEventListener('click', e => {
+    const btn = e.target.closest('.th-sort'); if (!btn) return;
     if (suppressSort) return; // a column resize drag just ended — don't sort
-    if (sort.key === th.dataset.sort) sort.dir = sort.dir === 'asc' ? 'desc' : 'asc';
-    else sort = { key: th.dataset.sort, dir: ['name', 'os', 'location', 'ratio', 'storage'].includes(th.dataset.sort) ? 'asc' : 'desc' };
-    renderResults();
+    applySortClick(btn.dataset.sort, e.shiftKey);
+  });
+  $('#btnResetSort').addEventListener('click', () => {
+    ui().sort = [{ key: 'total', dir: 'desc' }];
+    renderResults(); save(true); toast('Sort reset to Total / mo, highest first.');
+  });
+
+  /* ---- advanced filter builder ---- */
+  const fp = $('#filterPanel');
+  $('#btnToggleFilters').addEventListener('click', () => {
+    const body = $('#filterBody');
+    const open = body.hidden;
+    body.hidden = !open;
+    $('#btnToggleFilters').setAttribute('aria-expanded', String(open));
+    fp.classList.toggle('open', open);
+    if (open) { const s = $('#ruleList select'); if (s) s.focus(); }
+  });
+  $('#btnAddRule').addEventListener('click', () => {
+    const F = filterState();
+    F.rules.push(newRule());
+    rulesDirty = true;
+    $('#filterBody').hidden = false;
+    $('#btnToggleFilters').setAttribute('aria-expanded', 'true');
+    fp.classList.add('open');
+    renderResults(); save(true);
+    const rows = $$('#ruleList .rule');
+    const last = rows[rows.length - 1];
+    if (last) { const inp = last.querySelector('[data-rv="1"]'); if (inp) inp.focus(); }
+  });
+  $('#btnClearRules').addEventListener('click', () => {
+    const F = filterState();
+    if (!F.rules.length) return;
+    const n = F.rules.length;
+    F.rules = [];
+    rulesDirty = true;
+    renderResults(); save(true);
+    toast(`${n} filter rule${n === 1 ? '' : 's'} cleared.`);
+  });
+  $$('input[name="filterJoin"]').forEach(r => r.addEventListener('change', () => {
+    filterState().join = r.value === 'OR' ? 'OR' : 'AND';
+    rulesDirty = true; // the and/or connector text between rows changes
+    renderResults(); save(true);
   }));
+  const ruleOf = el => {
+    const row = el.closest('.rule');
+    return row ? filterState().rules.find(x => x.id === row.dataset.rid) : null;
+  };
+  $('#ruleList').addEventListener('change', e => {
+    const rule = ruleOf(e.target); if (!rule) return;
+    if (e.target.dataset.rf === 'field') {
+      rule.field = e.target.value;
+      const t = fieldDef(rule.field).type;
+      rule.op = FILTER_OPS[t][0][0];
+      rule.v1 = t === 'bool' ? 'yes' : ''; // a yes/no rule is complete the moment it is added
+      rule.v2 = '';
+      rulesDirty = true;
+    } else if (e.target.dataset.rf === 'op') {
+      rule.op = e.target.value;
+      rulesDirty = true; // between adds a second input; “is empty” removes the value field
+    } else if (e.target.dataset.rv) {
+      rule[e.target.dataset.rv === '2' ? 'v2' : 'v1'] = e.target.value;
+    }
+    renderResults(); save(true);
+  });
+  $('#ruleList').addEventListener('input', e => {
+    if (!e.target.dataset.rv) return;
+    const rule = ruleOf(e.target); if (!rule) return;
+    rule[e.target.dataset.rv === '2' ? 'v2' : 'v1'] = e.target.value;
+    renderResults(); save(true); // rulesDirty stays false so the caret keeps its place
+  });
+  $('#ruleList').addEventListener('click', e => {
+    if (!e.target.closest('[data-rdel]')) return;
+    const row = e.target.closest('.rule');
+    const F = filterState();
+    F.rules = F.rules.filter(x => x.id !== row.dataset.rid);
+    rulesDirty = true;
+    renderResults(); save(true);
+    ($('#btnAddRule')).focus();
+  });
+
+  /* ---- row selection + bulk tagging ---- */
+  $('#resTable').addEventListener('change', e => {
+    const cb = e.target.closest('.rowsel'); if (!cb) return;
+    if (cb.checked) selected.add(cb.dataset.id); else selected.delete(cb.dataset.id);
+    cb.closest('tr').classList.toggle('rowsel-on', cb.checked);
+    renderSelBar(computeRows());
+  });
+  $('#selAll').addEventListener('change', e => {
+    const ids = computeRows().rows.map(r => r.vm.id);
+    if (e.target.checked) ids.forEach(id => selected.add(id));
+    else ids.forEach(id => selected.delete(id));
+    renderResults();
+  });
+  $('#btnSelVisible').addEventListener('click', () => {
+    computeRows().rows.forEach(r => selected.add(r.vm.id));
+    renderResults();
+  });
+  $('#btnSelClear').addEventListener('click', () => { selected.clear(); renderResults(); });
+  $('#btnTagAdd').addEventListener('click', () => openTagModal('add'));
+  $('#btnTagRemove').addEventListener('click', () => openTagModal('remove'));
+  $('#btnTagReplace').addEventListener('click', () => openTagModal('replace'));
+  $$('#tagModal [data-close-tag]').forEach(b => b.addEventListener('click', closeTagModal));
+  $('#tagModal').addEventListener('click', e => { if (e.target.id === 'tagModal') closeTagModal(); });
+  $('#tagModalInput').addEventListener('keydown', e => {
+    if (e.key === 'Enter' || e.key === ',' || e.key === ';' || e.key === '|') {
+      e.preventDefault();
+      if (cleanTag(e.target.value)) addDraftTags(e.target.value);
+    } else if (e.key === 'Backspace' && e.target.value === '' && tagDraft.length) {
+      e.preventDefault(); tagDraft.pop(); renderTagModal();
+    }
+  });
+  $('#tagModalInput').addEventListener('change', e => { if (cleanTag(e.target.value)) addDraftTags(e.target.value); });
+  $('#tagModal').addEventListener('click', e => {
+    const del = e.target.closest('[data-draftdel]');
+    if (del) { const k = del.dataset.draftdel.toLowerCase(); tagDraft = tagDraft.filter(t => t.toLowerCase() !== k); renderTagModal(); return; }
+    const sug = e.target.closest('[data-sug]');
+    if (sug) { addDraftTags(sug.dataset.sug); $('#tagModalInput').focus(); }
+  });
+  $('#tagReplaceConfirm').addEventListener('change', renderTagModal);
+  $('#btnTagApply').addEventListener('click', applyTagAction);
+
   $('#btnResetCols').addEventListener('click', () => resetColW(false));
-  $('#btnExportCsv').addEventListener('click', exportResultsCsv);
+  /* export always asks for scope so the user never guesses what a file contains */
+  $('#btnExportCsv').addEventListener('click', openExportModal);
+  $$('#exportModal [data-close-export]').forEach(b => b.addEventListener('click', () => { $('#exportModal').hidden = true; }));
+  $('#exportModal').addEventListener('click', e => { if (e.target.id === 'exportModal') $('#exportModal').hidden = true; });
+  $('#btnExportGo').addEventListener('click', () => {
+    const scope = exportScope();
+    $('#exportModal').hidden = true;
+    exportResultsCsv(scope);
+  });
   $('#btnPrint').addEventListener('click', () => window.print());
 
   // CSV import
@@ -1346,7 +2054,11 @@ function initEvents() {
   });
 
   // clients
-  $('#clientSelect').addEventListener('change', e => { state.activeId = e.target.value; locFilter = ''; renderAll(); save(true); });
+  $('#clientSelect').addEventListener('change', e => {
+    state.activeId = e.target.value;
+    locFilter = ''; selected.clear(); rulesDirty = true; // sort + rules come from the new profile's ui state
+    renderAll(); save(true);
+  });
   $('#btnSaveClient').addEventListener('click', () => save());
   $('#btnNewClient').addEventListener('click', () => {
     const name = prompt('New client name:', 'Client ' + (Object.keys(state.clients).length + 1));
@@ -1411,6 +2123,7 @@ function initEvents() {
               location: typeof v.location === 'string' ? v.location : '', // legacy profiles: no location -> Unassigned
               dr: v.dr === true || v.dr === 'true' || v.dr === 1, // legacy profiles: no dr -> unprotected
               drGb: (v.dr === true || v.dr === 'true' || v.dr === 1) ? (Number(v.drGb) || 0) : 0,
+              tags: normalizeTagList(Array.isArray(v.tags) ? v.tags : []).tags, // legacy profiles: no tags
               ratioId: v.ratioId || dR, storageId: v.storageId || dS, addons: v.addons || []
             })), updated: Date.now() };
           state.clients[id] = cl; last = id;
@@ -1423,7 +2136,10 @@ function initEvents() {
   });
 
   document.addEventListener('keydown', e => {
-    if (e.key === 'Escape' && !$('#mapModal').hidden) { $('#mapModal').hidden = true; pending = null; }
+    if (e.key !== 'Escape') return;
+    if (!$('#tagModal').hidden) return closeTagModal();
+    if (!$('#exportModal').hidden) { $('#exportModal').hidden = true; return; }
+    if (!$('#mapModal').hidden) { $('#mapModal').hidden = true; pending = null; }
   });
 }
 
@@ -1449,7 +2165,7 @@ if (!STORE.getItem(LS_KEY)) {
       const drOn = parseDrFlag(row.Zerto);
       return { id: uid(), name: row.Name, os: row.OS, location: (row.Location || '').trim(), ram: parseFloat(row.RAM_GB) || 0, disk: parseFloat(row.Disk_GB) || 0,
         dr: drOn, drGb: drOn ? (parseFloat(row.DR_Storage_GB) || 0) : 0,
-        ratioId: (rt || p.ratios[0]).id, storageId: (st || p.storage[0]).id, addons: [] };
+        ratioId: (rt || p.ratios[0]).id, storageId: (st || p.storage[0]).id, tags: parseTagCell(row.Tags), addons: [] };
     });
   })();
   pending = null;
