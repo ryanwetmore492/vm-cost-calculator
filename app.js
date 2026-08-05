@@ -543,8 +543,9 @@ function applySortClick(key, additive) {
   renderResults(); save(true);
 }
 const SORT_LABELS = { name: 'Name', os: 'OS', location: 'Location', tags: 'Tags', ratio: 'Ratio', storage: 'Storage tier', ram: 'RAM GB', disk: 'Disk GB', compute: 'Compute $', vmware: 'VMware lic $', storageCost: 'Storage $', spla: 'Win SPLA $', addons: 'Add-ons $', dr: 'DR $', total: 'Total / mo', drOn: 'Zerto' };
-function sortSummaryText() {
-  return sortSpec().map((s, i) => `${i ? 'then ' : ''}${SORT_LABELS[s.key]} ${s.dir === 'asc' ? '↑' : '↓'}`).join(', ');
+function sortSummaryText(markHidden) {
+  const hid = markHidden ? new Set(hiddenKeys()) : new Set();
+  return sortSpec().map((s, i) => `${i ? 'then ' : ''}${SORT_LABELS[s.key]} ${s.dir === 'asc' ? '↑' : '↓'}${hid.has(s.key) ? ' (hidden column)' : ''}`).join(', ');
 }
 function renderSortIndicators() {
   const spec = sortSpec();
@@ -736,7 +737,11 @@ function renderFilterSummary(V) {
   parts.push(locFilter ? `location: ${esc(locFilter)}` : 'all locations');
   parts.push(V.active.length ? `${V.active.length} active rule${V.active.length === 1 ? '' : 's'} (${V.join})` : 'no active rules');
   if (V.incomplete) parts.push(`${V.incomplete} incomplete rule${V.incomplete === 1 ? '' : 's'} ignored`);
-  parts.push(`sort: ${esc(sortSummaryText())}`);
+  parts.push(`sort: ${esc(sortSummaryText(true))}`);
+  const hc = hiddenCount();
+  if (hc) parts.push(`${hc} column${hc === 1 ? '' : 's'} hidden`);
+  const inUse = hiddenInUse();
+  if (inUse.length) parts.push(`<span class="warn-inline"><span aria-hidden="true">\u26a0</span> hidden column${inUse.length === 1 ? '' : 's'} still applied: ${esc(inUse.join(', '))}</span>`);
   $('#filterSummary').innerHTML = parts.join(' · ');
 }
 
@@ -761,6 +766,7 @@ function renderSelBar(V) {
 /* ================= RENDER: results ================= */
 function renderResults() {
   const all = allCosts();
+  renderColMeta(); // keep the Columns pill honest even when the table itself is empty
   renderLocationFilter(all);
   const V = computeRows();
   const rows = V.rows;
@@ -804,42 +810,49 @@ function renderResults() {
     ${kpi('Avg cost / VM', rows.length ? usd(T.total / rows.length) : '—', rows.length ? 'across visible rows' : 'no rows match')}`;
 
   const sorted = rows;
-  const COLSPAN = 18;
-  $('#resTable tbody').innerHTML = sorted.length ? sorted.map((r, i) => `
-    <tr${selected.has(r.vm.id) ? ' class="rowsel-on"' : ''}>
-      <td class="w-sel stick stick-1"><input type="checkbox" class="rowsel" data-id="${r.vm.id}" ${selected.has(r.vm.id) ? 'checked' : ''} aria-label="Select ${esc(r.vm.name || '(unnamed)')} for bulk tagging"></td>
-      <td class="w-idx mono stick stick-2">${i + 1}</td>
-      <td class="txt strong stick stick-3 stick-edge" title="${esc(r.vm.name || '(unnamed)')}">${esc(r.vm.name || '(unnamed)')}</td>
-      <td class="txt"><span class="os-tag ${r.windows ? 'win' : /linux|ubuntu|centos|rhel|red hat|debian|suse/i.test(r.vm.os) ? 'lin' : ''}">${esc(r.vm.os || '—')}</span></td>
-      <td class="txt loc${r.location === UNASSIGNED ? ' unassigned' : ''}" title="${esc(r.location)}">${esc(r.location)}</td>
-      <td class="txt tags-cell" title="${r.tags.length ? esc(r.tags.join(', ')) : 'No tags'}">${r.tags.length ? r.tags.map(t => `<span class="tag-chip ro">${esc(t)}</span>`).join('') : '<span class="muted">—</span>'}</td>
-      <td class="num">${num(r.ram)}</td>
-      <td class="num">${num(r.disk)}</td>
-      <td class="txt">${esc(r.ratioLabel)}</td>
-      <td class="txt">${esc(shortTier(r.storageLabel))}</td>
-      <td class="num${r.compute ? '' : ' zero'}">${usd(r.compute)}</td>
-      <td class="num${r.vmware ? '' : ' zero'}">${usd(r.vmware)}</td>
-      <td class="num${r.storage ? '' : ' zero'}">${usd(r.storage)}</td>
-      <td class="num${r.spla ? '' : ' zero'}">${usd(r.spla)}</td>
-      <td class="num${r.addons ? '' : ' zero'}">${usd(r.addons)}</td>
-      <td class="txt w-drs"><span class="st-tag${r.drOn ? ' on' : ''}">${r.drOn ? 'Protected' : 'No DR'}</span></td>
-      <td class="num${r.dr ? '' : ' zero'}"${r.drOn ? ` title="${num(r.drGb)} DR GB × $${drRateNum(drRate(P()))}/GB + ${usd(drFeeRate(P()))} fee"` : ' title="Not Zerto-protected"'}>${usd(r.dr)}</td>
-      <td class="num total">${usd(r.total)}</td>
-      <td class="spacer"></td>
-    </tr>`).join('')
-    : `<tr class="no-match"><td colspan="${COLSPAN}">No VMs match the current location and filter rules. Adjust or clear the rules above.</td><td class="spacer"></td></tr>`;
+  /* One cell per canonical column index, then only the visible ones are joined —
+     hiding a column never shifts the frozen trio or the tfoot alignment. */
+  const vis = visIdx();
+  $('#resTable tbody').innerHTML = sorted.length ? sorted.map((r, i) => {
+    const c = [];
+    c[0] = `<td class="w-sel stick stick-1"><input type="checkbox" class="rowsel" data-id="${r.vm.id}" ${selected.has(r.vm.id) ? 'checked' : ''} aria-label="Select ${esc(r.vm.name || '(unnamed)')} for bulk tagging"></td>`;
+    c[1] = `<td class="w-idx mono stick stick-2">${i + 1}</td>`;
+    c[2] = `<td class="txt strong stick stick-3 stick-edge" title="${esc(r.vm.name || '(unnamed)')}">${esc(r.vm.name || '(unnamed)')}</td>`;
+    c[3] = `<td class="txt"><span class="os-tag ${r.windows ? 'win' : /linux|ubuntu|centos|rhel|red hat|debian|suse/i.test(r.vm.os) ? 'lin' : ''}">${esc(r.vm.os || '—')}</span></td>`;
+    c[4] = `<td class="txt loc${r.location === UNASSIGNED ? ' unassigned' : ''}" title="${esc(r.location)}">${esc(r.location)}</td>`;
+    c[5] = `<td class="txt tags-cell" title="${r.tags.length ? esc(r.tags.join(', ')) : 'No tags'}">${r.tags.length ? r.tags.map(t => `<span class="tag-chip ro">${esc(t)}</span>`).join('') : '<span class="muted">—</span>'}</td>`;
+    c[6] = `<td class="num">${num(r.ram)}</td>`;
+    c[7] = `<td class="num">${num(r.disk)}</td>`;
+    c[8] = `<td class="txt">${esc(r.ratioLabel)}</td>`;
+    c[9] = `<td class="txt">${esc(shortTier(r.storageLabel))}</td>`;
+    c[10] = `<td class="num${r.compute ? '' : ' zero'}">${usd(r.compute)}</td>`;
+    c[11] = `<td class="num${r.vmware ? '' : ' zero'}">${usd(r.vmware)}</td>`;
+    c[12] = `<td class="num${r.storage ? '' : ' zero'}">${usd(r.storage)}</td>`;
+    c[13] = `<td class="num${r.spla ? '' : ' zero'}">${usd(r.spla)}</td>`;
+    c[14] = `<td class="num${r.addons ? '' : ' zero'}">${usd(r.addons)}</td>`;
+    c[15] = `<td class="txt w-drs"><span class="st-tag${r.drOn ? ' on' : ''}">${r.drOn ? 'Protected' : 'No DR'}</span></td>`;
+    c[16] = `<td class="num${r.dr ? '' : ' zero'}"${r.drOn ? ` title="${num(r.drGb)} DR GB × $${drRateNum(drRate(P()))}/GB + ${usd(drFeeRate(P()))} fee"` : ' title="Not Zerto-protected"'}>${usd(r.dr)}</td>`;
+    c[17] = `<td class="num total">${usd(r.total)}</td>`;
+    return `<tr${selected.has(r.vm.id) ? ' class="rowsel-on"' : ''}>${vis.map(k => c[k]).join('')}<td class="spacer"></td></tr>`;
+  }).join('')
+    : `<tr class="no-match"><td colspan="${vis.length}">No VMs match the current location and filter rules. Adjust or clear the rules above.</td><td class="spacer"></td></tr>`;
 
+  const scopeLabel = locFilter ? locFilter + ' subtotal' : (V.active.length ? 'Filtered total' : 'Grand total');
+  const f = [];
+  f[3] = '<td></td>'; f[4] = '<td></td>'; f[5] = '<td></td>'; f[8] = '<td></td>'; f[9] = '<td></td>';
+  f[6] = `<td class="num">${num(T.ram)}</td>`;
+  f[7] = `<td class="num">${num(T.disk)}</td>`;
+  f[10] = `<td class="num">${usd(T.compute)}</td>`;
+  f[11] = `<td class="num">${usd(T.vmware)}</td>`;
+  f[12] = `<td class="num">${usd(T.storage)}</td>`;
+  f[13] = `<td class="num">${usd(T.spla)}</td>`;
+  f[14] = `<td class="num">${usd(T.addons)}</td>`;
+  f[15] = `<td class="txt w-drs label">${T.drVms} on</td>`;
+  f[16] = `<td class="num">${usd(T.dr)}</td>`;
+  f[17] = `<td class="num" style="color:var(--primary)">${usd(T.total)}</td>`;
   $('#resTable tfoot').innerHTML = `<tr>
-      <td class="label stick stick-1 stick-edge" colspan="3">Total · ${rows.length} VM${rows.length === 1 ? '' : 's'} shown</td>
-      <td class="label" colspan="2">${locFilter ? esc(locFilter) + ' subtotal' : (V.active.length ? 'Filtered total' : 'Grand total')}</td>
-      <td></td>
-      <td class="num">${num(T.ram)}</td><td class="num">${num(T.disk)}</td>
-      <td colspan="2"></td>
-      <td class="num">${usd(T.compute)}</td><td class="num">${usd(T.vmware)}</td><td class="num">${usd(T.storage)}</td>
-      <td class="num">${usd(T.spla)}</td><td class="num">${usd(T.addons)}</td>
-      <td class="txt w-drs label">${T.drVms} on</td>
-      <td class="num">${usd(T.dr)}</td>
-      <td class="num" style="color:var(--primary)">${usd(T.total)}</td>
+      <td class="label stick stick-1 stick-edge" colspan="3"><span class="tf-main">Total · ${rows.length} VM${rows.length === 1 ? '' : 's'} shown</span><span class="tf-scope">${esc(scopeLabel)}</span></td>
+      ${vis.filter(i => i > 2).map(i => f[i]).join('')}
       <td class="spacer"></td>
     </tr>`;
 
@@ -1010,13 +1023,261 @@ function reconcileVmTiers() {
   });
 }
 
+/* ================= Cost breakdown: column visibility =================
+   Every column of the results table is described once in COLS (canonical index
+   order). Hiding a column is purely visual: the row objects, sorting, filter
+   rules, totals, roll-ups and both CSV export scopes always run over the full
+   data set. The first three columns are frozen and cannot be hidden, so the
+   sticky offsets never have to move. Hidden keys and the matching preset live in
+   the per-client `ui()` bag next to the sort, filters and column widths. */
+const COLS = [
+  { key: 'sel', label: 'Selection', group: 'Always visible', essential: true },
+  { key: 'idx', label: '#', group: 'Always visible', essential: true },
+  { key: 'name', label: 'Name', group: 'Always visible', essential: true },
+  { key: 'os', label: 'OS', group: 'VM configuration' },
+  { key: 'location', label: 'Location', group: 'VM configuration' },
+  { key: 'tags', label: 'Tags', group: 'VM configuration' },
+  { key: 'ram', label: 'RAM GB', group: 'VM configuration' },
+  { key: 'disk', label: 'Disk GB', group: 'VM configuration' },
+  { key: 'ratio', label: 'Ratio', group: 'VM configuration' },
+  { key: 'storage', label: 'Storage tier', group: 'VM configuration' },
+  { key: 'compute', label: 'Compute $', group: 'Charges' },
+  { key: 'vmware', label: 'VMware lic $', group: 'Charges' },
+  { key: 'storageCost', label: 'Storage $', group: 'Charges' },
+  { key: 'spla', label: 'Win SPLA $', group: 'Charges' },
+  { key: 'addons', label: 'Add-ons $', group: 'Charges' },
+  { key: 'drOn', label: 'Zerto', group: 'Zerto DR' },
+  { key: 'dr', label: 'DR $', group: 'Zerto DR' },
+  { key: 'total', label: 'Total / mo', group: 'Charges' }
+];
+const OPTIONAL_KEYS = COLS.filter(c => !c.essential).map(c => c.key);
+/* Presets list the OPTIONAL columns they show; the frozen trio is implicit.
+   Total / mo anchors every preset so a rollup number is always on screen. */
+const COL_PRESETS = [
+  { id: 'config', label: 'VM configuration', keys: ['os', 'location', 'tags', 'ram', 'disk', 'ratio', 'storage', 'total'] },
+  { id: 'core', label: 'Core costs', keys: ['ram', 'disk', 'compute', 'vmware', 'storageCost', 'total'] },
+  { id: 'licensing', label: 'Licensing', keys: ['os', 'vmware', 'spla', 'addons', 'total'] },
+  { id: 'storagedr', label: 'Storage & DR', keys: ['disk', 'storage', 'storageCost', 'drOn', 'dr', 'total'] },
+  { id: 'all', label: 'All columns', keys: OPTIONAL_KEYS.slice() }
+];
+const colDef = k => COLS.find(c => c.key === k);
+function colState() {
+  const u = ui();
+  if (!Array.isArray(u.colHidden)) u.colHidden = [];
+  u.colHidden = Array.from(new Set(u.colHidden)).filter(k => { const c = colDef(k); return !!c && !c.essential; });
+  if (typeof u.colPreset !== 'string') u.colPreset = '';
+  return u;
+}
+const hiddenKeys = () => colState().colHidden;
+const colVisible = i => !!COLS[i] && !hiddenKeys().includes(COLS[i].key);
+const visIdx = () => COLS.map((c, i) => i).filter(colVisible);
+const hiddenCount = () => hiddenKeys().length;
+const keySig = list => list.slice().sort().join(',');
+function presetIdFor(hidden) {
+  const hid = new Set(hidden);
+  const shown = keySig(OPTIONAL_KEYS.filter(k => !hid.has(k)));
+  const m = COL_PRESETS.find(p => keySig(p.keys) === shown);
+  return m ? m.id : 'custom';
+}
+const presetLabelFor = id => (COL_PRESETS.find(p => p.id === id) || { label: 'Custom' }).label;
+/* Columns that are hidden yet still decide what the table shows. */
+function hiddenInUse() {
+  const hid = new Set(hiddenKeys());
+  const out = [];
+  sortSpec().forEach(sp => { if (hid.has(sp.key)) out.push(`${colDef(sp.key).label} (sort)`); });
+  filterState().rules.filter(ruleActive).forEach(r => { if (hid.has(r.field)) out.push(`${colDef(r.field).label} (filter rule)`); });
+  return Array.from(new Set(out));
+}
+/* Single entry point for any visibility change: persist, re-render, then give
+   freshly revealed columns a content-fitted width (their cells only exist in
+   the DOM after the re-render, so measuring has to happen afterwards). */
+function setColHidden(list, preset) {
+  const u = colState();
+  const before = new Set(u.colHidden);
+  u.colHidden = Array.from(new Set(list)).filter(k => { const c = colDef(k); return !!c && !c.essential; });
+  u.colPreset = preset || presetIdFor(u.colHidden);
+  const revealed = COLS.map((c, i) => i).filter(i => before.has(COLS[i].key) && colVisible(i));
+  renderResults();
+  if (revealed.length && !$('#resTable').hidden && $('#resTable').offsetParent) {
+    const nat = measureColW();
+    const cur = savedColW() || nat;
+    revealed.forEach(i => { cur[i] = nat[i]; });
+    ui().resColW = cur;
+    applyColW(cur);
+  }
+  save(true);
+}
+function renderColMeta() {
+  const shown = COLS.length - hiddenCount();
+  const pid = presetIdFor(hiddenKeys());
+  colState().colPreset = pid;
+  $('#colCountPill').textContent = `${shown}/${COLS.length}`;
+  $('#btnColumns').title = `${shown} of ${COLS.length} columns shown · preset: ${presetLabelFor(pid)}`;
+  if (!$('#colModal').hidden) renderColModal();
+}
+function renderColModal() {
+  const hid = new Set(hiddenKeys());
+  const shown = COLS.length - hid.size;
+  const pid = presetIdFor(hiddenKeys());
+  $('#colStatus').innerHTML = `<strong>${shown}</strong> of ${COLS.length} columns shown · preset: <strong>${esc(presetLabelFor(pid))}</strong>`
+    + (hid.size ? ` · hidden: ${esc(COLS.filter(c => hid.has(c.key)).map(c => c.label).join(', '))}` : '');
+  $('#colPresets').innerHTML = COL_PRESETS.map(p => `<label class="preset-chip${p.id === pid ? ' on' : ''}">
+      <input type="radio" name="colPreset" value="${p.id}" ${p.id === pid ? 'checked' : ''}>${esc(p.label)}</label>`).join('')
+    + (pid === 'custom' ? '<span class="preset-custom mono" role="status">Custom selection</span>' : '');
+  const groups = [];
+  COLS.forEach((c, i) => {
+    let g = groups.find(x => x.name === c.group);
+    if (!g) groups.push(g = { name: c.group, items: [] });
+    g.items.push({ c, i });
+  });
+  $('#colGroups').innerHTML = groups.map(g => `<fieldset class="col-group"><legend>${esc(g.name)}</legend>
+    ${g.items.map(({ c }) => `<label class="col-check${c.essential ? ' locked' : ''}">
+        <input type="checkbox" data-col="${c.key}" ${c.essential || !hid.has(c.key) ? 'checked' : ''} ${c.essential ? 'disabled' : ''}>
+        <span>${esc(c.label)}${c.essential ? ' <em class="mono">frozen</em>' : ''}</span></label>`).join('')}
+    </fieldset>`).join('');
+  const inUse = hiddenInUse();
+  $('#colWarn').hidden = !inUse.length;
+  $('#colWarn').innerHTML = inUse.length
+    ? `<span aria-hidden="true">\u26a0</span> Hidden but still applied: <strong>${esc(inUse.join(', '))}</strong>. The rows and totals on screen already reflect them.`
+    : '';
+}
+function openColModal() {
+  renderColModal();
+  $('#colModal').hidden = false;
+  const first = $('#colPresets input');
+  if (first) first.focus();
+}
+function closeColModal() {
+  $('#colModal').hidden = true;
+  $('#btnColumns').focus();
+}
+
+/* ================= sticky viewport-bottom horizontal scrollbar =================
+   The results table keeps its own native bottom scrollbar. This control is a
+   second, equally wide scrollbar pinned to the bottom of the viewport so a wide
+   table can be panned without scrolling all the way down to its native bar.
+   It only appears while the table is on screen, actually overflowed and its own
+   scrollbar is below the fold. The thumb is drawn (not native) because overlay
+   scrollbars fade out on macOS and in headless Chrome, which would leave an
+   empty strip. Position flows one way in each direction: pointer/keyboard input
+   writes the table's scrollLeft, and the table's scroll event repaints the
+   thumb — so there is no scroll-event feedback loop. */
+const tableScroller = () => { const t = $('#resTable'); return t ? t.closest('.table-scroll') : null; };
+// bar height comes from the --xbar-h CSS variable so the media query can grow it on touch screens
+const XBAR_H = () => parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--xbar-h')) || 30;
+function xbarTarget() {
+  const sc = tableScroller(), t = $('#resTable');
+  if (!sc || !t || t.hidden || activeTab() !== 'results') return null;
+  const max = sc.scrollWidth - sc.clientWidth;
+  if (max < 2) return null; // nothing to scroll
+  const r = sc.getBoundingClientRect();
+  const vh = window.innerHeight || document.documentElement.clientHeight;
+  const h = XBAR_H();
+  if (r.bottom < 48 || r.top > vh - h - 8) return null; // table off screen
+  if (r.bottom <= vh - h) return null; // the table's own scrollbar is already in view
+  return { sc, r, max };
+}
+function paintXbarThumb(sc, max) {
+  const track = $('#xbarTrack'), thumb = $('#xbarThumb');
+  const tw = track.clientWidth;
+  const w = Math.max(40, Math.round(tw * Math.min(1, sc.clientWidth / sc.scrollWidth)));
+  const frac = max > 0 ? Math.min(1, Math.max(0, sc.scrollLeft / max)) : 0;
+  thumb.style.width = w + 'px';
+  thumb.style.transform = `translateX(${Math.round(frac * (tw - w))}px)`;
+  const pct = Math.round(frac * 100);
+  track.setAttribute('aria-valuenow', String(pct));
+  track.setAttribute('aria-valuetext', `scrolled ${pct}% of the table width`);
+  $('#xbarPct').textContent = pct + '%';
+}
+function updateXbar() {
+  const bar = $('#xbar'); if (!bar) return;
+  const target = xbarTarget();
+  if (!target) {
+    if (!bar.hidden) { bar.hidden = true; document.body.classList.remove('xbar-on'); }
+    return;
+  }
+  const { sc, r, max } = target;
+  const vw = document.documentElement.clientWidth;
+  bar.hidden = false;
+  document.body.classList.add('xbar-on');
+  const left = Math.max(0, Math.round(r.left));
+  bar.style.left = left + 'px';
+  bar.style.width = Math.round(Math.max(120, Math.min(r.width, vw - left))) + 'px';
+  paintXbarThumb(sc, max);
+}
+let xbarQueued = false;
+function queueXbar() {
+  if (xbarQueued) return;
+  xbarQueued = true;
+  requestAnimationFrame(() => { xbarQueued = false; updateXbar(); });
+}
+function xbarScrollTo(px) {
+  const sc = tableScroller(); if (!sc) return;
+  const max = sc.scrollWidth - sc.clientWidth;
+  sc.scrollLeft = Math.max(0, Math.min(max, px));
+  paintXbarThumb(sc, max);
+}
+function initXbar() {
+  const track = $('#xbarTrack'), thumb = $('#xbarThumb');
+  const sc0 = tableScroller();
+  if (sc0) sc0.addEventListener('scroll', queueXbar, { passive: true });
+
+  let drag = null;
+  thumb.addEventListener('pointerdown', e => {
+    const sc = tableScroller(); if (!sc) return;
+    drag = { x: e.clientX, start: sc.scrollLeft, tw: track.clientWidth, thw: thumb.offsetWidth, max: sc.scrollWidth - sc.clientWidth };
+    thumb.setPointerCapture(e.pointerId);
+    track.classList.add('dragging');
+    track.focus(); // keyboard paging keeps working after a drag
+    e.preventDefault();
+  });
+  thumb.addEventListener('pointermove', e => {
+    if (!drag) return;
+    const span = Math.max(1, drag.tw - drag.thw);
+    xbarScrollTo(drag.start + ((e.clientX - drag.x) / span) * drag.max);
+  });
+  const endDrag = () => { drag = null; track.classList.remove('dragging'); };
+  thumb.addEventListener('pointerup', endDrag);
+  thumb.addEventListener('pointercancel', endDrag);
+  // click anywhere on the track centres the view on that point
+  track.addEventListener('pointerdown', e => {
+    if (e.target === thumb) return;
+    const sc = tableScroller(); if (!sc) return;
+    const r = track.getBoundingClientRect();
+    const frac = Math.min(1, Math.max(0, (e.clientX - r.left) / r.width));
+    xbarScrollTo(frac * (sc.scrollWidth - sc.clientWidth) );
+    track.focus();
+  });
+  track.addEventListener('keydown', e => {
+    const sc = tableScroller(); if (!sc) return;
+    const max = sc.scrollWidth - sc.clientWidth;
+    const step = e.shiftKey ? 320 : 80;
+    const page = Math.max(120, sc.clientWidth - 60);
+    const moves = { ArrowLeft: -step, ArrowRight: step, PageUp: -page, PageDown: page };
+    if (e.key === 'Home') { e.preventDefault(); return xbarScrollTo(0); }
+    if (e.key === 'End') { e.preventDefault(); return xbarScrollTo(max); }
+    if (!(e.key in moves)) return;
+    e.preventDefault();
+    xbarScrollTo(sc.scrollLeft + moves[e.key]);
+  });
+  window.addEventListener('scroll', queueXbar, { passive: true });
+  window.addEventListener('resize', queueXbar);
+  if (window.ResizeObserver) {
+    const ro = new ResizeObserver(queueXbar);
+    ro.observe($('#resTable'));
+    if (sc0) ro.observe(sc0);
+    ro.observe(document.body);
+  }
+  queueXbar();
+}
+
 /* ================= results table: resizable + frozen columns =================
    Widths live in <col> elements (cheap, no per-cell writes) and persist per
    client profile. The first three columns (select checkbox, # and Name) are
    position:sticky, so the sticky offset of column 2 tracks column 1's live
    width and column 3's offset tracks columns 1 + 2. */
 /* select box, #, Name, Tags (chips need room or every row grows three lines tall) */
-const COLW_MIN = i => (i === 0 ? 44 : i === 1 ? 34 : i === 2 ? 120 : i === 5 ? 150 : 56);
+const COLW_MIN = i => (i === 0 ? 44 : i === 1 ? 34 : i === 2 ? 120 : i === 5 ? 150 : i === 15 ? 104 : 56); // 15 = Zerto, keeps the "Protected" chip unclipped
 const COLW_MAX = 720;
 let suppressSort = false;
 const resCols = () => $$('#resTable colgroup col:not(.spacer)');
@@ -1024,32 +1285,44 @@ const resHeads = () => $$('#resTable thead th:not(.spacer)');
 function ui() { const c = active(); if (!c.ui || typeof c.ui !== 'object') c.ui = {}; return c.ui; }
 function savedColW() {
   const w = ui().resColW;
-  return Array.isArray(w) && w.length === resCols().length && w.every(n => isFinite(n) && n > 0) ? w.slice() : null;
+  return Array.isArray(w) && w.length === COLS.length && w.every(n => isFinite(n) && n > 0) ? w.slice() : null;
 }
+/* `w` is always a full 18-entry array in canonical column order; only the
+   visible columns get a <col> and the hidden headers are display:none, so the
+   frozen trio keeps its offsets no matter what else is hidden. */
 function applyColW(w) {
   const t = $('#resTable');
-  resCols().forEach((c, i) => { c.style.width = w[i] + 'px'; });
+  const vis = visIdx();
+  $('#resTable colgroup').innerHTML = vis.map(i => `<col style="width:${w[i]}px">`).join('') + '<col class="spacer">';
+  resHeads().forEach((th, i) => { th.hidden = !colVisible(i); });
   t.classList.add('cols-fixed');
   // width:100% + min-width:sum lets the trailing spacer column absorb any slack
   t.style.width = '100%';
-  t.style.minWidth = w.reduce((a, n) => a + n, 0) + 'px';
+  t.style.minWidth = vis.reduce((a, i) => a + w[i], 0) + 'px';
   t.style.setProperty('--stick-1w', w[0] + 'px');
   t.style.setProperty('--stick-2w', w[1] + 'px');
+  renderColMeta();
+  queueXbar();
 }
 /* Natural (content-driven) widths: drop the fixed layout, let the browser lay
    the table out, then read each header cell back. */
 function measureColW() {
   const t = $('#resTable');
   const prevW = t.style.width, prevMin = t.style.minWidth;
+  const prevCols = $('#resTable colgroup').innerHTML;
+  const prevHidden = resHeads().map(th => th.hidden);
+  resHeads().forEach(th => { th.hidden = false; }); // measure hidden columns too
   t.classList.remove('cols-fixed');
   t.style.width = ''; t.style.minWidth = '';
-  resCols().forEach(c => { c.style.width = ''; });
+  $('#resTable colgroup').innerHTML = COLS.map(() => '<col>').join('') + '<col class="spacer">';
   /* Reserve room for the sort arrow + priority number on every sortable header,
      otherwise a column clips its own label the moment it joins the sort. */
   const w = resHeads().map((th, i) => {
     const pad = th.querySelector('.th-sort') ? 30 : 2;
     return Math.min(COLW_MAX, Math.max(COLW_MIN(i), Math.ceil(th.getBoundingClientRect().width) + pad));
   });
+  $('#resTable colgroup').innerHTML = prevCols;
+  resHeads().forEach((th, i) => { th.hidden = prevHidden[i]; });
   t.style.width = prevW; t.style.minWidth = prevMin;
   return w;
 }
@@ -1693,6 +1966,7 @@ function initEvents() {
     // always rebuild the tab being shown from state — nothing can be stale
     renderChrome();
     renderTab(t.dataset.tab);
+    queueXbar();
   }));
   $('#btnGoInventory').addEventListener('click', () => $('.tab[data-tab="inventory"]').click());
   $$('[data-proxy]').forEach(b => b.addEventListener('click', () => $('#' + b.dataset.proxy).click()));
@@ -1861,6 +2135,35 @@ function initEvents() {
   $('#btnResetSort').addEventListener('click', () => {
     ui().sort = [{ key: 'total', dir: 'desc' }];
     renderResults(); save(true); toast('Sort reset to Total / mo, highest first.');
+  });
+
+  /* ---- column visibility ---- */
+  $('#btnColumns').addEventListener('click', openColModal);
+  $$('#colModal [data-close-col]').forEach(b => b.addEventListener('click', closeColModal));
+  $('#colModal').addEventListener('click', e => { if (e.target.id === 'colModal') closeColModal(); });
+  $('#colPresets').addEventListener('change', e => {
+    const r = e.target.closest('input[name="colPreset"]'); if (!r) return;
+    const p = COL_PRESETS.find(x => x.id === r.value); if (!p) return;
+    setColHidden(OPTIONAL_KEYS.filter(k => !p.keys.includes(k)), p.id);
+    renderColModal();
+    toast(`Preset applied: ${p.label} · ${COLS.length - hiddenCount()} of ${COLS.length} columns shown.`);
+  });
+  $('#colGroups').addEventListener('change', e => {
+    const cb = e.target.closest('input[data-col]'); if (!cb) return;
+    const key = cb.dataset.col;
+    const hid = new Set(hiddenKeys());
+    if (cb.checked) hid.delete(key); else hid.add(key);
+    if (hid.size === COLS.length - 3) { // every optional column off — keep at least Total / mo
+      hid.delete('total');
+      toast('At least one data column stays visible — Total / mo kept.');
+    }
+    setColHidden(Array.from(hid));
+    renderColModal();
+  });
+  $('#btnColsAll').addEventListener('click', () => {
+    setColHidden([], 'all');
+    renderColModal();
+    toast('All 18 columns shown.');
   });
 
   /* ---- advanced filter builder ---- */
@@ -2137,6 +2440,7 @@ function initEvents() {
 
   document.addEventListener('keydown', e => {
     if (e.key !== 'Escape') return;
+    if (!$('#colModal').hidden) return closeColModal();
     if (!$('#tagModal').hidden) return closeTagModal();
     if (!$('#exportModal').hidden) { $('#exportModal').hidden = true; return; }
     if (!$('#mapModal').hidden) { $('#mapModal').hidden = true; pending = null; }
@@ -2148,6 +2452,7 @@ document.documentElement.dataset.theme = 'dark'; // dark-first: data-center aest
 initEvents();
 initColResize();
 renderAll();
+initXbar();
 $('#savedStamp').textContent = 'loaded ' + new Date().toLocaleTimeString();
 $('#storageInfo').textContent = STORE.persistent ? 'browser storage' : 'in-memory (preview frame — export JSON to keep your work)';
 

@@ -23,7 +23,7 @@ A reusable, pure client-side web app for calculating monthly cost per VM in a VM
     Typical use: a client inventory already priced without DR, then a CSV with just `Name,Zerto,DR_Storage_GB` merged in — DR costs appear for the matched VMs and nothing else changes.
 - **Tags in CSV** — a `Tags` column is auto-detected on import and always written on export; multiple values live in one cell (see [Tags](#tags))
 - **VM tags** — zero or more reusable free-form labels per VM (chip editor in the inventory, bulk tagging in the Cost breakdown, CSV round-trip). See [Tags](#tags).
-- **Cost breakdown** — per-VM table (including a DR $ column) with **prioritized multi-column sorting**, an **advanced filter builder**, a Tags column, row selection for bulk tagging, drag-resizable columns, frozen checkbox / # / server-name columns, KPI summary cards, SKU roll-up, cost-by-location roll-up with location filter, and a scoped CSV export. See [Cost breakdown workflow](#cost-breakdown-workflow).
+- **Cost breakdown** — per-VM table (including a DR $ column) with **prioritized multi-column sorting**, an **advanced filter builder**, **column visibility presets**, a **sticky horizontal scrollbar pinned to the bottom of the viewport**, a Tags column, row selection for bulk tagging, drag-resizable columns, frozen checkbox / # / server-name columns, KPI summary cards, SKU roll-up, cost-by-location roll-up with location filter, and a scoped CSV export. See [Cost breakdown workflow](#cost-breakdown-workflow).
 - **Multi-client profiles** — save/load client environments (VM list + pricing) in browser localStorage, with JSON export/import for backup and sharing
 
 ## Tags
@@ -108,6 +108,56 @@ field type:
   are active and how many rows survive.
 - Rules are saved with the client profile alongside the sort state.
 
+### Column visibility
+
+The **Columns** button (next to *Reset sort*) opens a dialog listing all 18 table columns grouped by purpose.
+Tick or untick individual columns, or apply a preset:
+
+| Preset | Columns shown (besides the frozen Selection / # / Name) |
+|--------|--------------------------------------------------------|
+| **VM configuration** | OS · Location · Tags · RAM GB · Disk GB · Ratio · Storage tier · Total / mo |
+| **Core costs** | RAM GB · Disk GB · Compute $ · VMware lic $ · Storage $ · Total / mo |
+| **Licensing** | OS · VMware lic $ · Win SPLA $ · Add-ons $ · Total / mo |
+| **Storage & DR** | Disk GB · Storage tier · Storage $ · Zerto · DR $ · Total / mo |
+| **All columns** | Everything (default) |
+
+*Total / mo* anchors every preset so a bottom-line figure is always on screen.
+
+- **Selection, # and Name cannot be hidden** — they stay visible and frozen at the left edge, so the sticky
+  offsets never move when other columns are hidden.
+- Presets apply immediately. Changing any checkbox afterwards keeps the new set and reports the state as
+  **Custom**. Unticking the last remaining data column is refused: *Total / mo* is kept.
+- **Hiding a column is visual only.** Sorting, filter rules, the footer totals, the KPI cards, the SKU and
+  location roll-ups, bulk tagging and **both CSV export scopes always use the full data set** — a hidden column
+  still contributes every field to `Export results CSV`.
+- If a hidden column is still driving the view, that is stated in words (never colour alone): the summary line
+  above the table appends `sort: Location ↑ (hidden column)`, an `N columns hidden` count and a
+  `⚠ hidden columns still applied: …` note, and the Columns dialog repeats the warning at the top.
+- Column widths are stored per column, not per position, so a column you hide and re-show returns at its own
+  width; a newly revealed column is auto-fitted to its content. Resizing, auto-fit (double-click an edge) and
+  **Reset column widths** all work on whatever is currently visible.
+- The visible set and the selected preset are saved in the client profile, alongside sort, filter rules and
+  column widths — they survive tab switches, reloads and profile switching, and each client keeps its own.
+
+### Sticky horizontal scrollbar
+
+Wide tables are hard to pan when their native scrollbar sits far below the fold, so a second horizontal
+scrollbar pins itself to the bottom of the viewport. It appears only when all of the following are true:
+
+- the **Results** tab is active and the table is rendered,
+- the table is actually overflowed horizontally,
+- part of the table is on screen, and
+- the table's own bottom scrollbar is **not** in view (once it is, the sticky bar disappears — the native
+  scrollbar is always preserved).
+
+It matches the table's left edge and width, mirrors the table's scroll position in both directions, and
+re-measures on window resize, column resize and column show/hide. The thumb is drawn rather than native, because
+overlay scrollbars (macOS, some Chrome builds) fade out and would leave an empty strip. It is a real
+`role="scrollbar"` control: focusable, with `aria-valuenow` and a live percentage readout, draggable, click-to-jump
+on the track, and `←` / `→` (hold `Shift` for a bigger step), `Page Up` / `Page Down`, `Home` and `End` from the
+keyboard. On touch-width screens it spans the full width and grows to a 40px bar with a 26px track. It never
+covers page controls, is pushed clear of the footer, and never prints.
+
 ### Row selection
 
 Selection is session-only (never persisted) and is **kept** when filters, location or sort change, so narrowing
@@ -129,8 +179,10 @@ Filenames follow `vm-costs-<client-slug>-<YYYY-MM-DD>-<visible|all-inventory>.cs
 
 ### Accessibility notes
 
-Header sort buttons, filter rules, the selection bar, the tag chip editors and both modals are fully
-keyboard-operable with visible focus rings; `Escape` closes any modal. Interactive targets are ~44px where the
+Header sort buttons, filter rules, the selection bar, the tag chip editors, the Columns dialog, the sticky
+horizontal scrollbar and every modal are fully keyboard-operable with visible focus rings; `Escape` closes any
+modal and returns focus to the button that opened it. Status text, hidden-column counts and hidden-but-applied
+warnings are spelled out in words, never signalled by colour alone. Interactive targets are ~44px where the
 table's density allows, and no text is rendered below 12px.
 
 ## Architecture
@@ -140,7 +192,7 @@ Static site — no backend, no build step. All data stays in the browser (localS
 | File | Purpose |
 |------|---------|
 | `index.html` | Layout, tabs, modals, templates |
-| `app.js` | State, reactive rendering, cost math, tags, sort/filter engines, CSV import/export, profiles |
+| `app.js` | State, reactive rendering, cost math, tags, sort/filter engines, column visibility, sticky scrollbar, CSV import/export, profiles |
 | `styles.css` | Dark/light enterprise theme |
 | `sample-vm-inventory.csv` | Example import file (includes a `Tags` column) |
 

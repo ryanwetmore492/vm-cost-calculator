@@ -13,6 +13,7 @@
   --radius-sm:.375rem; --radius-md:.5rem; --radius-lg:.75rem;
   --font-sans:'Satoshi','Inter',system-ui,-apple-system,sans-serif;
   --font-mono:'JetBrains Mono',ui-monospace,'SF Mono',Menlo,monospace;
+  --xbar-h:30px; /* sticky horizontal scrollbar height — read by app.js */
 }
 
 /* Dark (default) — cool graphite racks, teal telemetry accent */
@@ -478,6 +479,69 @@ body.col-resizing *{cursor:col-resize!important}
 .scope-opt span{display:flex;flex-direction:column;gap:.2rem;font-size:var(--text-xs)}
 .scope-opt em{font-style:normal;color:var(--text-muted);font-family:var(--font-mono);font-size:var(--text-2xs);line-height:1.5}
 
+
+/* ---------- results tfoot label: scope moved into the frozen cell so the
+   footer stays correct when the OS / Location columns are hidden ---------- */
+.res-table tfoot td.label .tf-main{display:block}
+.res-table tfoot td.label .tf-scope{display:block;color:var(--text-faint);font-family:var(--font-mono);
+  text-transform:none;letter-spacing:0;font-size:var(--text-2xs)}
+
+/* ---------- inline warning inside the filter summary ---------- */
+.warn-inline{color:var(--amber)}
+.warn-inline strong{color:var(--amber)}
+
+/* ---------- Columns dialog ---------- */
+.col-status{margin:0;font-size:var(--text-xs);color:var(--text-muted);line-height:1.5}
+.col-status strong{color:var(--text);font-family:var(--font-mono)}
+.preset-set,.col-group{border:1px solid var(--border);border-radius:var(--radius-md);padding:var(--space-3) var(--space-4);margin:0}
+.preset-set>legend,.col-group>legend{padding:0 .35rem;font-size:var(--text-2xs);text-transform:uppercase;
+  letter-spacing:.09em;color:var(--text-faint);font-weight:600}
+.preset-row{display:flex;flex-wrap:wrap;gap:var(--space-2);align-items:center}
+.preset-chip{display:inline-flex;align-items:center;gap:.4rem;min-height:36px;padding:.35rem .7rem;
+  border:1px solid var(--border-strong);border-radius:999px;background:var(--surface-2);
+  font-size:var(--text-xs);color:var(--text-muted);cursor:pointer;transition:border-color .12s ease,color .12s ease}
+.preset-chip:hover{color:var(--text);border-color:var(--primary-dim)}
+.preset-chip.on{border-color:var(--primary);color:var(--text);background:var(--primary-soft);font-weight:600}
+.preset-chip input{accent-color:var(--primary);width:14px;height:14px}
+.preset-chip:focus-within{outline:2px solid var(--primary);outline-offset:2px}
+.preset-custom{font-size:var(--text-2xs);color:var(--amber);padding-left:.25rem}
+.col-groups{display:flex;flex-direction:column;gap:var(--space-3)}
+.col-group{display:grid;grid-template-columns:repeat(auto-fill,minmax(11rem,1fr));gap:.15rem var(--space-3)}
+.col-check{display:flex;align-items:center;gap:.5rem;min-height:34px;padding:.15rem .25rem;
+  border-radius:var(--radius-sm);font-size:var(--text-xs);color:var(--text);cursor:pointer}
+.col-check:hover{background:var(--surface-2)}
+.col-check input{accent-color:var(--primary);width:16px;height:16px;flex:0 0 auto}
+.col-check:focus-within{outline:2px solid var(--primary);outline-offset:1px}
+.col-check.locked{color:var(--text-muted);cursor:default}
+.col-check.locked:hover{background:transparent}
+.col-check em{font-style:normal;font-size:var(--text-2xs);color:var(--text-faint)}
+.col-warn{margin:0;font-size:var(--text-xs);line-height:1.5;color:var(--amber);
+  border:1px solid color-mix(in oklab,var(--amber) 45%,transparent);background:color-mix(in oklab,var(--amber) 9%,transparent);
+  border-radius:var(--radius-md);padding:var(--space-3)}
+.col-warn strong{color:var(--amber)}
+
+/* ---------- sticky viewport-bottom horizontal scrollbar ----------
+   A mirror of the results table's own scroll container. The table keeps its
+   native bottom scrollbar; this one is only pinned while that one is off-screen. */
+.xbar{position:fixed;bottom:0;z-index:45;display:flex;align-items:center;gap:.4rem;
+  height:var(--xbar-h);padding:0 .5rem;box-sizing:border-box;
+  background:color-mix(in oklab,var(--surface-2) 92%,transparent);
+  border:1px solid var(--border-strong);border-bottom:0;
+  border-radius:var(--radius-md) var(--radius-md) 0 0;
+  backdrop-filter:blur(6px);box-shadow:0 -6px 18px rgba(0,0,0,.35)}
+.xbar-glyph{color:var(--text-faint);font-size:var(--text-2xs);line-height:1}
+.xbar-pct{color:var(--text-faint);font-size:var(--text-2xs);line-height:1;min-width:2.6rem;text-align:right}
+/* Custom track + thumb rather than a native scrollbar: overlay scrollbars fade
+   out (macOS, Chrome headless) and would leave an empty strip. */
+.xbar-track{flex:1 1 auto;position:relative;height:16px;border-radius:8px;background:var(--surface-3);
+  border:1px solid var(--border);cursor:pointer;touch-action:none}
+.xbar-track:focus-visible{outline:2px solid var(--primary);outline-offset:2px}
+.xbar-thumb{position:absolute;top:2px;bottom:2px;left:0;min-width:40px;border-radius:6px;
+  background:var(--border-strong);transition:background .12s ease}
+.xbar-track:hover .xbar-thumb,.xbar-track:focus-visible .xbar-thumb{background:var(--primary-dim)}
+.xbar-track.dragging .xbar-thumb{background:var(--primary)}
+body.xbar-on .foot{padding-bottom:calc(var(--space-5) + var(--xbar-h))} /* never sit on top of footer text */
+
 @media (max-width:640px){
   .imp-row{align-items:flex-start}
   .imp-x{margin-left:0}
@@ -500,10 +564,17 @@ body.col-resizing *{cursor:col-resize!important}
   .rule-x{margin-left:auto;min-width:44px;min-height:44px}
   .sel-bar .btn{flex:1 1 auto}
   .token-box{max-width:none;width:100%}
+  .col-group{grid-template-columns:1fr}
+  .col-check{min-height:44px}
+  .preset-chip{min-height:44px;flex:1 1 auto;justify-content:center}
+  :root{--xbar-h:40px} /* roomier touch target */
+  .xbar{left:0!important;width:100%!important;border-left:0;border-right:0;border-radius:0}
+  .xbar-track{height:26px}
+  .xbar-thumb{min-width:56px}
 }
 @media print{
   .topbar,.tabs,.head-btns,.foot,.toast-wrap,#tierRollup,#locFilterBar,#impSummary,
-  #filterPanel,#selBar,#tagModal,#exportModal{display:none!important}
+  #filterPanel,#selBar,#tagModal,#exportModal,#colModal,#xbar{display:none!important}
   .res-table{table-layout:auto!important;width:100%!important}
   .res-table col{width:auto!important}
   .res-table .stick{position:static!important;box-shadow:none!important;background:transparent!important}
