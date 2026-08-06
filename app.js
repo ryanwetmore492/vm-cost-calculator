@@ -1519,10 +1519,18 @@ function matchTier(list, value, keyFields) {
       if (tv === v || shortTier(tv) === v) return t;
     }
   }
+  /* Fuzzy (substring) pass: label/name fields only, and only once both sides are
+     long enough that an accidental containment is implausible (e.g. a bare "1"
+     would otherwise match tier label "4:1"). SKU is excluded entirely — it's an
+     opaque code, not something a user would legitimately type a fragment of, and
+     a short or generic SKU (numeric "3819", placeholder "CUSTOM") is exactly the
+     kind of string that turns up as an unrelated substring of real CSV data by
+     coincidence, silently misrouting the row to the wrong tier with no warning. */
+  const fuzzyFields = keyFields.filter(kf => kf !== 'sku');
   for (const t of list) {
-    for (const kf of keyFields) {
+    for (const kf of fuzzyFields) {
       const tv = shortTier(String(t[kf] || '').toLowerCase());
-      if (tv && (tv.includes(v) || v.includes(tv))) return t;
+      if (tv && tv.length >= 3 && v.length >= 3 && (tv.includes(v) || v.includes(tv))) return t;
     }
   }
   return null;
