@@ -1826,7 +1826,8 @@ function refreshPreview() {
   if (miss.length) {
     msgs.push(`<strong>Required column${miss.length > 1 ? 's' : ''} not mapped:</strong> ${miss.join(', ')} — the Import button is disabled until ${miss.length > 1 ? 'these are' : 'this is'} mapped.`);
     if (!merge && b.map.name && VMS().length)
-      msgs.push(`<strong>Tip:</strong> only enriching existing VMs (e.g. adding Zerto DR data)? Switch <em>Existing VMs</em> to <strong>Merge / update existing VMs</strong> — merge matches by server name, needs only the VM name column, and writes only the columns you mapped.`);
+      msgs.push(`<strong>Tip:</strong> only enriching existing VMs (e.g. adding Zerto DR data)? Merge matches by server name, needs only the VM name column, and writes only the columns you mapped — RAM and disk won't be required.<br>
+        <button type="button" class="btn primary" id="btnSwitchToMerge">Switch to merge mode</button>`);
   }
   if (merge) {
     const fields = ent.length ? Array.from(new Set([].concat(...ent.map(e => e.fields)))) : [];
@@ -2452,6 +2453,12 @@ function initEvents() {
   $('#mapLocation').addEventListener('input', refreshPreview);
   $$('#mapModal [data-close]').forEach(b => b.addEventListener('click', () => { $('#mapModal').hidden = true; pending = null; }));
   $('#mapModal').addEventListener('click', e => { if (e.target.id === 'mapModal') { $('#mapModal').hidden = true; pending = null; } });
+  $('#mapWarn').addEventListener('click', e => {
+    if (e.target.id !== 'btnSwitchToMerge') return;
+    const sel = $('#mapMode');
+    sel.value = 'merge';
+    sel.dispatchEvent(new Event('change', { bubbles: true }));
+  });
   $('#btnConfirmImport').addEventListener('click', () => {
     const { vms, entries, mode, map: m, effectiveMatchMode } = buildImport();
     if (mode === 'merge') {
