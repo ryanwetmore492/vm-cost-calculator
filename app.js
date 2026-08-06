@@ -24,6 +24,17 @@ const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': 
 const usd = n => (isFinite(n) ? n : 0).toLocaleString('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const num = n => (isFinite(n) ? n : 0).toLocaleString('en-US', { maximumFractionDigits: 2 });
 const r2 = n => Math.round((n + Number.EPSILON) * 100) / 100;
+/* Price and quantity fields must never go negative. The `min="0"` HTML attribute
+   only affects the native spinner UI, not typed input, so a stray "-" keystroke
+   would otherwise flow straight into cost math as a negative line item. Only
+   snaps the visible field back when a negative number was actually entered —
+   never mid-typing a decimal like "0.", which parses to a non-negative 0. */
+function clampNonNeg(el) {
+  const parsed = parseFloat(el.value) || 0;
+  const clamped = Math.max(0, parsed);
+  if (parsed < 0) el.value = clamped;
+  return clamped;
+}
 
 /* ---------------- defaults ---------------- */
 function defaultPricing() {
@@ -333,7 +344,7 @@ function bindCfg(tableSel) {
     if (f === 'unit') return; // selects are handled in the change listener below
     const list = { ratio: P().ratios, storage: P().storage, addon: P().addons }[tr.dataset.kind];
     const item = list.find(x => x.id === tr.dataset.id); if (!item) return;
-    if (f === 'price') item.price = parseFloat(e.target.value) || 0;
+    if (f === 'price') item.price = clampNonNeg(e.target);
     else if (f === 'isDefault') { list.forEach(x => x.isDefault = false); item.isDefault = true; }
     else if (f === 'defaultOn') item.defaultOn = e.target.checked;
     else item[f] = e.target.value;
@@ -2151,21 +2162,21 @@ function initEvents() {
   const licBind = [['#licVmSku', p => v => p.vmwareLic.sku = v], ['#licVmName', p => v => p.vmwareLic.name = v],
     ['#splaSku', p => v => p.spla.sku = v], ['#splaName', p => v => p.spla.name = v]];
   licBind.forEach(([sel, fn]) => $(sel).addEventListener('input', e => { fn(P())(e.target.value); afterPricingChange(false); }));
-  $('#licVmPrice').addEventListener('input', e => { P().vmwareLic.price = parseFloat(e.target.value) || 0; afterPricingChange(false); });
-  $('#splaPrice').addEventListener('input', e => { P().spla.price = parseFloat(e.target.value) || 0; afterPricingChange(false); });
+  $('#licVmPrice').addEventListener('input', e => { P().vmwareLic.price = clampNonNeg(e.target); afterPricingChange(false); });
+  $('#splaPrice').addEventListener('input', e => { P().spla.price = clampNonNeg(e.target); afterPricingChange(false); });
 
   // Zerto DR pricing
   const drBind = [['#drStoSku', v => P().dr.storage.sku = v], ['#drStoName', v => P().dr.storage.name = v],
     ['#drFeeSku', v => P().dr.fee.sku = v], ['#drFeeName', v => P().dr.fee.name = v]];
   drBind.forEach(([sel, fn]) => $(sel).addEventListener('input', e => { fn(e.target.value); afterPricingChange(false); }));
   $('#drStoPrice').addEventListener('input', e => {
-    P().dr.storage.price = parseFloat(e.target.value) || 0;
+    P().dr.storage.price = clampNonNeg(e.target);
     $('#drStoEcho').textContent = '$' + drRateNum(P().dr.storage.price) + '/GB';
     $('#drEcho').textContent = drSummary(P());
     afterPricingChange(false);
   });
   $('#drFeePrice').addEventListener('input', e => {
-    P().dr.fee.price = parseFloat(e.target.value) || 0;
+    P().dr.fee.price = clampNonNeg(e.target);
     $('#drFeeEcho').textContent = usd(P().dr.fee.price) + '/VM';
     $('#drEcho').textContent = drSummary(P());
     afterPricingChange(false);
@@ -2180,7 +2191,7 @@ function initEvents() {
     const tr = e.target.closest('tr[data-id]'); if (!tr) return;
     const vm = VMS().find(v => v.id === tr.dataset.id); if (!vm) return;
     const f = e.target.dataset.f;
-    if (f === 'ram' || f === 'disk' || f === 'drGb') vm[f] = parseFloat(e.target.value) || 0;
+    if (f === 'ram' || f === 'disk' || f === 'drGb') vm[f] = clampNonNeg(e.target);
     else if (f === 'name') vm.name = e.target.value;
     else if (f === 'location') vm.location = e.target.value;
     else if (f === 'os') {
