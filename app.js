@@ -1515,6 +1515,10 @@ function openMapper(file, parsed) {
   const enrichment = VMS().length && pending.map.name && !pending.map.ram && !pending.map.disk;
   $('#mapMode').value = enrichment ? 'merge' : (VMS().length ? 'append' : 'replace');
   $('#mapUnmatched').value = 'add';
+  /* Only default to location-aware matching when a location column was actually
+     detected — otherwise it would just trigger the "no location mapped" downgrade
+     note on first open, before the user has had a chance to map anything. */
+  $('#mapMatchKey').value = (pending.map.location && invHasCrossLocationDupes()) ? 'name+location' : 'name';
   $('#mapModal').hidden = false;
   refreshPreview();
 }
@@ -1526,8 +1530,28 @@ function readMap() {
 /* Import modes: replace · append · merge (update existing VMs matched by name). */
 function importMode() { const el = $('#mapMode'); return el ? el.value : 'append'; }
 function unmatchedAction() { const el = $('#mapUnmatched'); return el ? el.value : 'add'; }
+function matchKeyMode() { const el = $('#mapMatchKey'); return el ? el.value : 'name'; }
 /* Merge matching is case-insensitive and whitespace-trimmed. */
 const nameKey = s => String(s ?? '').trim().toLowerCase();
+const locKey = s => String(s ?? '').trim().toLowerCase();
+/* 'name' matches on server name alone (legacy behaviour); 'name+location' also
+   requires the location to match, so same-named VMs at different sites don't
+   collide. NUL cannot appear in a CSV cell, so it's a safe key separator. */
+function matchKeyFor(name, location, mode) {
+  return mode === 'name+location' ? nameKey(name) + '\u0000' + locKey(location) : nameKey(name);
+}
+/* True when the current inventory already has the same name at more than one
+   location — used to default new imports to the safer name+location match. */
+function invHasCrossLocationDupes() {
+  const byName = new Map();
+  VMS().forEach(v => {
+    const k = nameKey(v.name);
+    if (!byName.has(k)) byName.set(k, new Set());
+    byName.get(k).add(locKey(v.location));
+  });
+  for (const locs of byName.values()) if (locs.size > 1) return true;
+  return false;
+}
 
 /* Builds one entry per CSV row:
    `full`  = a complete new VM (used by replace/append and by merge's "add unmatched")
@@ -1540,6 +1564,11 @@ function buildImport() {
   const drScale = { GB: 1, MB: 1 / 1024, TB: 1024 }[$('#mapDrUnit').value];
   const fbR = $('#mapRatio').value, fbS = $('#mapStorage').value;
   const fbLoc = String($('#mapLocation').value || '').trim();
+  /* "name+location" only makes sense once a location column is actually mapped —
+     otherwise every row's location key is blank and it degrades to name-only anyway. */
+  const matchModeSel = matchKeyMode();
+  const effectiveMatchMode = (matchModeSel === 'name+location' && m.location) ? 'name+location' : 'name';
+  const matchModeDowngraded = matchModeSel === 'name+location' && !m.location;
   const warns = [];
   const vms = [], entries = [];
   pending.rows.forEach((row, i) => {
@@ -1593,25 +1622,30 @@ function buildImport() {
        A populated cell replaces the VM's tag list (predictable and round-trips). */
     if (m.tags && String(row[m.tags] ?? '').trim() !== '') patch.tags = parseTagCell(row[m.tags]);
 
+    const rawLoc = m.location ? String(row[m.location] ?? '').trim() : '';
+    const matchKey = matchKeyFor(name, rawLoc, effectiveMatchMode);
+
     vms.push(full);
-    entries.push({ row: i + 2, name, full, patch, fields: Object.keys(patch) });
+    entries.push({ row: i + 2, name, full, patch, fields: Object.keys(patch), matchKey });
   });
   const missing = mode === 'merge'
     ? (m.name ? [] : ['VM name'])
     : FIELDS.filter(f => f.req && !m[f.key]).map(f => f.label);
-  return { vms, entries, warns, missing, mode, map: m };
+  return { vms, entries, warns, missing, mode, map: m, effectiveMatchMode, matchModeDowngraded };
 }
 
-/* Plans a merge without mutating state — used for both the preview and the commit. */
-function planMerge(entries, action) {
+/* Plans a merge without mutating state — used for both the preview and the commit.
+   matchMode ('name' | 'name+location') must match what entries[].matchKey was built
+   with, so the CSV side and the inventory side are keyed the same way. */
+function planMerge(entries, action, matchMode = 'name') {
   const inv = VMS();
   const idx = new Map();
-  inv.forEach(v => { const k = nameKey(v.name); if (!idx.has(k)) idx.set(k, []); idx.get(k).push(v); });
+  inv.forEach(v => { const k = matchKeyFor(v.name, v.location, matchMode); if (!idx.has(k)) idx.set(k, []); idx.get(k).push(v); });
   const dupCsv = [], noName = [];
   const last = new Map(); // CSV duplicates: last row wins
   entries.forEach(e => {
     if (!e.name) { noName.push(e.row); return; }
-    const k = nameKey(e.name);
+    const k = e.matchKey;
     if (last.has(k)) dupCsv.push(e.name);
     last.set(k, e);
   });
@@ -1645,9 +1679,35 @@ function syncModeUi(mapped) {
   if (opt.disabled && sel.value === 'merge') sel.value = hasVms ? 'append' : 'replace';
   const uf = $('#mapUnmatchedField');
   if (uf) uf.hidden = sel.value !== 'merge';
+  const mk = $('#mapMatchKeyField');
+  if (mk) mk.hidden = sel.value !== 'merge';
   /* in merge mode only the name column is required — hide the other required markers */
   $('#mapGrid').classList.toggle('merge', sel.value === 'merge');
   return sel.value;
+}
+
+/* ---------------- merge preview: old -> new diff for mapped fields ---------------- */
+function fieldsEqual(field, a, b) {
+  if (field === 'ram' || field === 'disk' || field === 'drGb') return Math.abs((a || 0) - (b || 0)) < 0.005;
+  if (field === 'dr') return !!a === !!b;
+  if (field === 'tags') {
+    const norm = t => (t || []).map(x => String(x).toLowerCase()).sort().join('\u0000');
+    return norm(a) === norm(b);
+  }
+  return String(a ?? '').trim() === String(b ?? '').trim();
+}
+function fmtField(field, val, ctx) {
+  switch (field) {
+    case 'os': return esc(val) || '<span class="dash">—</span>';
+    case 'location': return val ? esc(val) : `<span class="unassigned">${UNASSIGNED}</span>`;
+    case 'ram': case 'disk': return num(val);
+    case 'dr': return val ? 'yes' : 'no';
+    case 'drGb': return ctx.dr ? num(val) : '<span class="dash">—</span>';
+    case 'ratioId': return esc((P().ratios.find(r => r.id === val) || {}).label || '—');
+    case 'storageId': return esc(shortTier((P().storage.find(s => s.id === val) || {}).name || '—'));
+    case 'tags': return (val || []).length ? (val || []).map(t => `<span class="tag-chip ro">${esc(t)}</span>`).join('') : '<span class="dash">—</span>';
+    default: return esc(String(val ?? ''));
+  }
 }
 
 function refreshPreview() {
@@ -1657,36 +1717,51 @@ function refreshPreview() {
   const b = (mode === built.mode) ? built : buildImport();
   const ent = b.entries, miss = b.missing, wrn = b.warns.slice();
   const merge = mode === 'merge';
-  const plan = merge ? planMerge(ent, unmatchedAction()) : null;
+  const plan = merge ? planMerge(ent, unmatchedAction(), b.effectiveMatchMode) : null;
 
   const unchanged = '<span class="dash" title="left unchanged">unchanged</span>';
   /* rows that will be inserted as new VMs show their real (defaulted) values;
-     rows that update an existing VM show “unchanged” for every unmapped field */
+     rows that update an existing VM show “unchanged” for every unmapped field, and an
+     old → new diff for a mapped field whose value is actually different from the VM
+     it's about to overwrite (single-target updates only — a multi-VM update has no
+     single "old" value to diff against). */
   const isAdd = e => !!plan && plan.adds.includes(e);
-  const cell = (e, field, html) => (merge && !isAdd(e) && !e.fields.includes(field)) ? unchanged : html;
+  const singleTarget = e => {
+    const hit = plan && plan.updates.find(u => u.entry === e);
+    return (hit && hit.targets.length === 1) ? hit.targets[0] : null;
+  };
   const head = (merge ? ['Action'] : []).concat(['Name', 'OS', 'Location', 'RAM GB', 'Disk GB', 'Zerto DR', 'DR GB', 'Ratio', 'Storage tier', 'Tags']);
   const action = e => {
     if (!e.name) return '<span class="tag skip">skip</span>';
-    const hit = (plan.updates.find(u => nameKey(u.entry.name) === nameKey(e.name)) || {});
+    const hit = (plan.updates.find(u => u.entry.matchKey === e.matchKey) || {});
     if (hit.targets && hit.entry === e) return `<span class="tag upd">update${hit.targets.length > 1 ? ' ×' + hit.targets.length : ''}</span>`;
     if (hit.targets) return '<span class="tag skip">superseded</span>';
     if (plan.adds.includes(e)) return '<span class="tag new">add new</span>';
-    const dup = plan.dupCsv.length && ent.some(o => o !== e && nameKey(o.name) === nameKey(e.name) && ent.indexOf(o) > ent.indexOf(e));
+    const dup = plan.dupCsv.length && ent.some(o => o !== e && o.matchKey === e.matchKey && ent.indexOf(o) > ent.indexOf(e));
     return dup ? '<span class="tag skip">superseded</span>' : '<span class="tag skip">skip</span>';
   };
   const rows = ent.slice(0, 8).map(e => {
     const v = e.full;
+    const target = merge && !isAdd(e) ? singleTarget(e) : null;
+    const cell = (field, rawNew) => {
+      if (merge && !isAdd(e) && !e.fields.includes(field)) return unchanged;
+      const newHtml = fmtField(field, rawNew, v);
+      if (target && e.fields.includes(field) && !fieldsEqual(field, target[field], rawNew)) {
+        return `<span class="diff-old">${fmtField(field, target[field], target)}</span><span class="diff-arrow" aria-hidden="true"></span><span class="diff-new">${newHtml}</span>`;
+      }
+      return newHtml;
+    };
     return `<tr>${merge ? `<td>${action(e)}</td>` : ''}
       <td>${esc(v.name)}</td>
-      <td>${cell(e, 'os', esc(v.os) || '<span class="dash">—</span>')}</td>
-      <td class="${!merge && !v.location ? 'unassigned' : ''}">${cell(e, 'location', v.location ? esc(v.location) : `<span class="unassigned">${UNASSIGNED}</span>`)}</td>
-      <td class="num mono">${cell(e, 'ram', num(v.ram))}</td>
-      <td class="num mono">${cell(e, 'disk', num(v.disk))}</td>
-      <td class="${v.dr ? 'mono' : 'unassigned'}">${cell(e, 'dr', v.dr ? 'yes' : 'no')}</td>
-      <td class="num mono">${cell(e, 'drGb', v.dr ? num(v.drGb) : '<span class="dash">—</span>')}</td>
-      <td>${cell(e, 'ratioId', esc((P().ratios.find(r => r.id === v.ratioId) || {}).label || '—'))}</td>
-      <td>${cell(e, 'storageId', esc(shortTier((P().storage.find(s => s.id === v.storageId) || {}).name || '—')))}</td>
-      <td>${cell(e, 'tags', (v.tags || []).length ? (v.tags || []).map(t => `<span class="tag-chip ro">${esc(t)}</span>`).join('') : '<span class="dash">—</span>')}</td></tr>`;
+      <td>${cell('os', v.os)}</td>
+      <td class="${!merge && !v.location ? 'unassigned' : ''}">${cell('location', v.location)}</td>
+      <td class="num mono">${cell('ram', v.ram)}</td>
+      <td class="num mono">${cell('disk', v.disk)}</td>
+      <td class="${v.dr ? 'mono' : 'unassigned'}">${cell('dr', v.dr)}</td>
+      <td class="num mono">${cell('drGb', v.drGb)}</td>
+      <td>${cell('ratioId', v.ratioId)}</td>
+      <td>${cell('storageId', v.storageId)}</td>
+      <td>${cell('tags', v.tags)}</td></tr>`;
   }).join('');
   $('#mapPreview thead').innerHTML = `<tr>${head.map(h => `<th>${h}</th>`).join('')}</tr>`;
   $('#mapPreview tbody').innerHTML = rows || `<tr><td colspan="${head.length}" class="muted">No importable rows with the current mapping.</td></tr>`;
@@ -1702,9 +1777,11 @@ function refreshPreview() {
   }
   if (merge) {
     const fields = ent.length ? Array.from(new Set([].concat(...ent.map(e => e.fields)))) : [];
-    msgs.push(`<strong>Merge mode:</strong> matches existing VMs by name (case-insensitive). Only mapped fields are written — ${fields.length ? '<span class="mono">' + fields.map(esc).join(', ') + '</span>' : 'nothing yet'}. Fallback tiers and the default location apply to newly added rows only.`);
-    if (plan.dupCsv.length) msgs.push(`<strong>Duplicate name${plan.dupCsv.length > 1 ? 's' : ''} in CSV:</strong> ${plan.dupCsv.slice(0, 5).map(esc).join(', ')}${plan.dupCsv.length > 5 ? ` …+${plan.dupCsv.length - 5}` : ''} — the last row for each name wins.`);
-    if (plan.dupInv.length) msgs.push(`<strong>Duplicate name${plan.dupInv.length > 1 ? 's' : ''} in inventory:</strong> ${plan.dupInv.slice(0, 5).map(d => esc(d.name) + ' ×' + d.n).join(', ')} — every match will be updated.`);
+    const matchDesc = b.effectiveMatchMode === 'name+location' ? 'name and location' : 'name';
+    msgs.push(`<strong>Merge mode:</strong> matches existing VMs by ${matchDesc} (case-insensitive). Only mapped fields are written — ${fields.length ? '<span class="mono">' + fields.map(esc).join(', ') + '</span>' : 'nothing yet'}. Fallback tiers and the default location apply to newly added rows only. A field that's actually changing on a single-VM match is shown as <span class="diff-old">old</span><span class="diff-arrow" aria-hidden="true"></span><span class="diff-new">new</span>.`);
+    if (b.matchModeDowngraded) msgs.push(`<strong>Note:</strong> “Name + location” matching needs a mapped location column — matching by name only until one is mapped.`);
+    if (plan.dupCsv.length) msgs.push(`<strong>Duplicate row${plan.dupCsv.length > 1 ? 's' : ''} in CSV:</strong> ${plan.dupCsv.slice(0, 5).map(esc).join(', ')}${plan.dupCsv.length > 5 ? ` …+${plan.dupCsv.length - 5}` : ''} — the last row for each match wins.`);
+    if (plan.dupInv.length) msgs.push(`<strong>Multiple existing VMs share the same ${matchDesc}:</strong> ${plan.dupInv.slice(0, 5).map(d => esc(d.name) + ' ×' + d.n).join(', ')} — every match will be updated.`);
     if (plan.unmatched.length) msgs.push(`<strong>${plan.unmatched.length} row${plan.unmatched.length > 1 ? 's' : ''} with no matching VM:</strong> ${plan.unmatched.slice(0, 5).map(esc).join(', ')}${plan.unmatched.length > 5 ? ` …+${plan.unmatched.length - 5}` : ''} — will be ${unmatchedAction() === 'add' ? 'added as new VMs' : 'skipped'}.`);
   }
   if (wrn.length) msgs.push(`<strong>${wrn.length} row note${wrn.length > 1 ? 's' : ''}:</strong><br>` + wrn.slice(0, 6).map(esc).join('<br>') + (wrn.length > 6 ? `<br>…and ${wrn.length - 6} more.` : ''));
@@ -2314,16 +2391,16 @@ function initEvents() {
     if (e.target.dataset.map === 'drGb') $('#mapDrUnit').value = guessUnit(e.target.value, 'disk');
     refreshPreview();
   });
-  ['#mapDiskUnit', '#mapRamUnit', '#mapDrUnit', '#mapRatio', '#mapStorage', '#mapLocation', '#mapMode', '#mapUnmatched'].forEach(s => $(s).addEventListener('change', refreshPreview));
+  ['#mapDiskUnit', '#mapRamUnit', '#mapDrUnit', '#mapRatio', '#mapStorage', '#mapLocation', '#mapMode', '#mapMatchKey', '#mapUnmatched'].forEach(s => $(s).addEventListener('change', refreshPreview));
   $('#mapLocation').addEventListener('input', refreshPreview);
   $$('#mapModal [data-close]').forEach(b => b.addEventListener('click', () => { $('#mapModal').hidden = true; pending = null; }));
   $('#mapModal').addEventListener('click', e => { if (e.target.id === 'mapModal') { $('#mapModal').hidden = true; pending = null; } });
   $('#btnConfirmImport').addEventListener('click', () => {
-    const { vms, entries, mode, map: m } = buildImport();
+    const { vms, entries, mode, map: m, effectiveMatchMode } = buildImport();
     if (mode === 'merge') {
       if (!m.name) return toast('Map the VM name column to merge.', true);
       const action = unmatchedAction();
-      const plan = planMerge(entries, action);
+      const plan = planMerge(entries, action, effectiveMatchMode);
       if (!plan.updatedVms && !plan.added) return toast('Nothing to merge with the current mapping.', true);
       // update matched VMs in place — only the mapped fields are written
       plan.updates.forEach(u => u.targets.forEach(v => Object.assign(v, u.entry.patch)));

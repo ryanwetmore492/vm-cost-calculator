@@ -209,6 +209,11 @@ tbody tr:hover{background:var(--surface-2)}
 .vm-table td:nth-child(3) .in{min-width:12rem}
 .vm-table td:nth-child(4) .in{min-width:11rem}
 .res-table td.unassigned, .loc-table td.unassigned, #mapPreview td.unassigned{color:var(--text-faint);font-style:italic}
+/* CSV merge preview: old → new diff for mapped fields that are actually changing */
+#mapPreview .diff-old{color:var(--text-faint);text-decoration:line-through;text-decoration-thickness:1px}
+#mapPreview .diff-arrow{color:var(--text-faint);margin:0 .3em}
+#mapPreview .diff-arrow::before{content:'\2192'}
+#mapPreview .diff-new{color:var(--blue);font-weight:600}
 .loc-table tbody td:first-child{font-family:var(--font-sans);white-space:nowrap}
 .res-table td.loc{max-width:11rem;overflow:hidden;text-overflow:ellipsis}
 .loc-table tfoot td{font-size:var(--text-xs)}
