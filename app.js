@@ -1490,7 +1490,10 @@ function autoMap(headers) {
   return map;
 }
 function guessUnit(header, kind) {
-  const h = String(header || '').toLowerCase();
+  /* underscores/hyphens count as word characters in regex, so \b won't fire between
+     "ram_" and "mb" — normalize to spaces first, same as autoMap()'s header matching,
+     so "RAM_MB" / "Disk-MB" are detected exactly like "RAM MB". */
+  const h = String(header || '').toLowerCase().replace(/[_-]+/g, ' ');
   if (/\bmib?\b|\bmb\b/.test(h)) return 'MB';
   if (/\btib?\b|\btb\b/.test(h)) return kind === 'disk' ? 'TB' : 'GB';
   return 'GB';
