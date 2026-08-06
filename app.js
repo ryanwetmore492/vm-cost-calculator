@@ -1432,15 +1432,20 @@ const FIELDS = [
   { key: 'os', label: 'Operating system', req: false, hints: ['os', 'os according to the configuration file', 'guest os', 'guest', 'operating system', 'os according to the vmware tools'] },
   { key: 'ram', label: 'RAM', req: true, hints: ['ram', 'ram_gb', 'ram gb', 'memory', 'memory mb', 'memory (gb)', 'memory size', 'mem'] },
   { key: 'disk', label: 'Provisioned disk', req: true, hints: ['disk', 'disk_gb', 'disk gb', 'provisioned', 'provisioned mb', 'provisioned mib', 'storage', 'total disk capacity', 'capacity', 'in use mb', 'allocated'],
-    /* a DR/replication size column is not the provisioned-disk column */
-    avoid: /\b(dr|zerto|journal|replica|draas)\b|disaster recovery|replication/ },
+    /* a DR/replication size column is not the provisioned-disk column, and neither is a
+       storage *profile/policy* name (e.g. Cloud Director's "Storage Profile Name" or
+       "Default Storage Policy Name") — those are tier labels, not a size in MB/GB. */
+    avoid: /\b(dr|zerto|journal|replica|draas)\b|disaster recovery|replication|profile|policy/ },
   { key: 'location', label: 'Location (optional)', req: false, hints: ['location', 'site', 'datacenter', 'data center', 'dc', 'data centre', 'facility', 'region', 'site name', 'dc name', 'location name'] },
   { key: 'drFlag', label: 'Zerto DR protected (optional)', req: false, hints: ['zerto', 'dr', 'dr protected', 'dr flag', 'disaster recovery', 'replicated', 'replication', 'protected', 'zerto protected', 'zerto dr', 'draas'],
     /* never grab a size column (“DR Storage GB”, “Journal MB”…) as the on/off flag */
     avoid: /\b(gb|mb|tb|gib|mib|tib)\b|size|capacity|journal|replica/ },
   { key: 'drGb', label: 'DR storage (optional)', req: false, hints: ['dr gb', 'dr storage', 'dr storage gb', 'zerto gb', 'journal', 'journal gb', 'replica', 'replica gb', 'dr size', 'replication gb', 'dr capacity'] },
   { key: 'ratio', label: 'Ratio tier (optional)', req: false, hints: ['ratio', 'ratio tier', 'processor ratio', 'tier', 'compute tier'] },
-  { key: 'storage', label: 'Storage tier (optional)', req: false, hints: ['storagetier', 'storage tier', 'storage_tier', 'datastore', 'storage policy', 'storage profile', 'policy'] },
+  /* the bare word "policy" is too generic — it also matches unrelated boolean/ID columns
+     like "Is Compute Policy Compliant" or "VM Placement Policy ID"; "storage policy" and
+     "storage profile" already cover the real Cloud Director column names. */
+  { key: 'storage', label: 'Storage tier (optional)', req: false, hints: ['storagetier', 'storage tier', 'storage_tier', 'datastore', 'storage policy', 'storage profile'] },
   /* One cell may hold several tags separated by ; , or | — see parseTagCell(). */
   { key: 'tags', label: 'Tags (optional)', req: false, hints: ['tags', 'tag', 'labels', 'label', 'categories', 'category', 'tag list', 'custom attributes', 'annotation'] }
 ];
@@ -1608,14 +1613,17 @@ function buildImport() {
 
     /* patch: mapped fields only. Blank cells in a mapped column are treated as
        "no data for this row" and are skipped, except the DR flag (an explicit
-       "no"/blank flag legitimately means unprotected). */
+       "no"/blank flag legitimately means unprotected). When only DR storage GB is
+       mapped (no flag column), a row's GB value — including an explicit 0 — updates
+       just the footprint number; it must not silently flip an existing VM's
+       protection flag, since that's a different field the user didn't map. */
     const patch = {};
     if (m.os && String(row[m.os] ?? '').trim() !== '') patch.os = String(row[m.os]).trim();
     if (m.location && String(row[m.location] ?? '').trim() !== '') patch.location = String(row[m.location]).trim();
     if (m.ram && isFinite(ramRaw)) patch.ram = r2(ramRaw * rScale);
     if (m.disk && isFinite(diskRaw)) patch.disk = r2(diskRaw * dScale);
     if (m.drFlag) { patch.dr = drOn; patch.drGb = drOn ? (m.drGb ? drGb : undefined) : 0; if (patch.drGb === undefined) delete patch.drGb; }
-    else if (m.drGb && isFinite(drGbRaw)) { patch.dr = drOn; patch.drGb = drOn ? drGb : 0; }
+    else if (m.drGb && isFinite(drGbRaw)) { patch.drGb = drGb; }
     if (rt) patch.ratioId = rt.id;
     if (st) patch.storageId = st.id;
     /* Tags: a blank cell means “no tag data for this row”, so existing tags survive.
@@ -1912,9 +1920,11 @@ function exportResultsCsv(scope) {
   lines.push(['Zerto DR basis', 'protected VMs only · ' + drSummary(p) + ' · DR storage GB entered manually per VM (not derived from provisioned disk)']);
   const csv = lines.map(l => l.map(c => {
     let s = String(c ?? '');
-    // Neutralize spreadsheet formula injection (leading = + - @) in text cells
-    if (/^[=+\-@]/.test(s) && isNaN(Number(s))) s = "'" + s;
-    return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+    // Neutralize spreadsheet formula injection (leading = + - @, tab or CR) in text cells
+    if (/^[=+\-@\t\r]/.test(s) && isNaN(Number(s))) s = "'" + s;
+    // Quote whenever a comma, quote, LF or bare CR is present — an unquoted CR could
+    // otherwise be read as a row break by a parser, corrupting the CSV's structure.
+    return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
   }).join(',')).join('\r\n');
   const slug = (active().name.replace(/[^a-z0-9]+/gi, '-').toLowerCase().replace(/^-|-$/g, '') || 'client');
   download(`vm-costs-${slug}-${new Date().toISOString().slice(0, 10)}-${scope === 'all' ? 'all-inventory' : 'visible'}.csv`, csv);
