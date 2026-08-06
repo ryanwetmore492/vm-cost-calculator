@@ -1406,7 +1406,12 @@ function initColResize() {
 
 /* ================= CSV helpers ================= */
 function download(filename, text, mime) {
-  const blob = new Blob([text], { type: mime || 'text/csv;charset=utf-8;' });
+  const effectiveMime = mime || 'text/csv;charset=utf-8;';
+  /* Excel doesn't sniff a CSV opened from disk as UTF-8 unless it starts with a
+     BOM — without one it falls back to the system codepage and mangles every
+     non-ASCII character (em dashes, curly quotes, ÷, · …) into mojibake. */
+  const body = /csv/i.test(effectiveMime) ? '﻿' + text : text;
+  const blob = new Blob([body], { type: effectiveMime });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a'); a.href = url; a.download = filename;
   document.body.appendChild(a); a.click(); a.remove();
@@ -1524,6 +1529,7 @@ function openMapper(file, parsed) {
      detected — otherwise it would just trigger the "no location mapped" downgrade
      note on first open, before the user has had a chance to map anything. */
   $('#mapMatchKey').value = (pending.map.location && invHasCrossLocationDupes()) ? 'name+location' : 'name';
+  $('#mapStripId').checked = csvNameStripWouldHelp();
   $('#mapModal').hidden = false;
   refreshPreview();
 }
@@ -1536,6 +1542,30 @@ function readMap() {
 function importMode() { const el = $('#mapMode'); return el ? el.value : 'append'; }
 function unmatchedAction() { const el = $('#mapUnmatched'); return el ? el.value : 'add'; }
 function matchKeyMode() { const el = $('#mapMatchKey'); return el ? el.value : 'name'; }
+function stripIdEnabled() { const el = $('#mapStripId'); return el ? el.checked : false; }
+/* Cloud Director creates the underlying vCenter VM object with a random 4-char
+   suffix (e.g. "SERVER01-a1B2") whenever the vCD-visible name needs disambiguating
+   in vCenter. Tools that read vCenter directly (Zerto Analytics, RVTools by MoRef,
+   etc.) report that suffixed name, while vCD's own exports usually show the clean
+   one — so the same VM can show up under two different-looking names. */
+function stripTrailingId(name) {
+  return String(name ?? '').replace(/-[A-Za-z0-9]{4}$/, '');
+}
+/* True when at least one pending CSV row's name doesn't match any current VM as-is,
+   but would after stripping a trailing vCenter-style ID — used to default the
+   "strip trailing ID" checkbox on for files that need it (e.g. Zerto Analytics). */
+function csvNameStripWouldHelp() {
+  if (!pending || !pending.map.name) return false;
+  const invNames = new Set(VMS().map(v => nameKey(v.name)));
+  return pending.rows.some(row => {
+    const raw = String(row[pending.map.name] ?? '').trim();
+    if (!raw) return false;
+    const k = nameKey(raw);
+    if (invNames.has(k)) return false;
+    const strippedKey = nameKey(stripTrailingId(raw));
+    return strippedKey !== k && invNames.has(strippedKey);
+  });
+}
 /* Merge matching is case-insensitive and whitespace-trimmed. */
 const nameKey = s => String(s ?? '').trim().toLowerCase();
 const locKey = s => String(s ?? '').trim().toLowerCase();
@@ -1614,16 +1644,17 @@ function buildImport() {
     /* patch: mapped fields only. Blank cells in a mapped column are treated as
        "no data for this row" and are skipped, except the DR flag (an explicit
        "no"/blank flag legitimately means unprotected). When only DR storage GB is
-       mapped (no flag column), a row's GB value — including an explicit 0 — updates
-       just the footprint number; it must not silently flip an existing VM's
-       protection flag, since that's a different field the user didn't map. */
+       mapped (no flag column), a positive value is authoritative proof of protection
+       from whatever DR system produced it (e.g. Zerto Analytics), so it turns
+       protection on — but a zero/blank stays ambiguous ("no data this refresh", not
+       "explicitly off") and must not silently disable an already-protected VM. */
     const patch = {};
     if (m.os && String(row[m.os] ?? '').trim() !== '') patch.os = String(row[m.os]).trim();
     if (m.location && String(row[m.location] ?? '').trim() !== '') patch.location = String(row[m.location]).trim();
     if (m.ram && isFinite(ramRaw)) patch.ram = r2(ramRaw * rScale);
     if (m.disk && isFinite(diskRaw)) patch.disk = r2(diskRaw * dScale);
     if (m.drFlag) { patch.dr = drOn; patch.drGb = drOn ? (m.drGb ? drGb : undefined) : 0; if (patch.drGb === undefined) delete patch.drGb; }
-    else if (m.drGb && isFinite(drGbRaw)) { patch.drGb = drGb; }
+    else if (m.drGb && isFinite(drGbRaw)) { patch.drGb = drGb; if (drGb > 0) patch.dr = true; }
     if (rt) patch.ratioId = rt.id;
     if (st) patch.storageId = st.id;
     /* Tags: a blank cell means “no tag data for this row”, so existing tags survive.
@@ -1634,7 +1665,7 @@ function buildImport() {
     const matchKey = matchKeyFor(name, rawLoc, effectiveMatchMode);
 
     vms.push(full);
-    entries.push({ row: i + 2, name, full, patch, fields: Object.keys(patch), matchKey });
+    entries.push({ row: i + 2, name, full, patch, fields: Object.keys(patch), matchKey, rawLoc });
   });
   const missing = mode === 'merge'
     ? (m.name ? [] : ['VM name'])
@@ -1644,8 +1675,10 @@ function buildImport() {
 
 /* Plans a merge without mutating state — used for both the preview and the commit.
    matchMode ('name' | 'name+location') must match what entries[].matchKey was built
-   with, so the CSV side and the inventory side are keyed the same way. */
-function planMerge(entries, action, matchMode = 'name') {
+   with, so the CSV side and the inventory side are keyed the same way. When stripId
+   is on, a CSV row with no direct match gets a second try against its name with a
+   trailing vCenter-style "-a1B2" ID stripped off (see stripTrailingId). */
+function planMerge(entries, action, matchMode = 'name', stripId = false) {
   const inv = VMS();
   const idx = new Map();
   inv.forEach(v => { const k = matchKeyFor(v.name, v.location, matchMode); if (!idx.has(k)) idx.set(k, []); idx.get(k).push(v); });
@@ -1657,19 +1690,29 @@ function planMerge(entries, action, matchMode = 'name') {
     if (last.has(k)) dupCsv.push(e.name);
     last.set(k, e);
   });
-  const updates = [], adds = [], unmatched = [], dupInv = [];
+  const updates = [], adds = [], unmatched = [], dupInv = [], stripped = [];
   last.forEach((e, k) => {
-    const targets = idx.get(k) || [];
+    let targets = idx.get(k) || [];
+    let viaStrip = false;
+    if (!targets.length && stripId) {
+      const strippedName = stripTrailingId(e.name);
+      if (nameKey(strippedName) !== nameKey(e.name)) {
+        const fbKey = matchKeyFor(strippedName, e.rawLoc, matchMode);
+        const fbTargets = idx.get(fbKey) || [];
+        if (fbTargets.length) { targets = fbTargets; viaStrip = true; }
+      }
+    }
     if (targets.length) {
       if (targets.length > 1) dupInv.push({ name: targets[0].name, n: targets.length });
-      updates.push({ entry: e, targets });
+      updates.push({ entry: e, targets, viaStrip });
+      if (viaStrip) stripped.push(e.name);
     } else {
       unmatched.push(e.name);
       if (action === 'add') adds.push(e);
     }
   });
   return {
-    updates, adds, unmatched, dupCsv, dupInv, noName,
+    updates, adds, unmatched, dupCsv, dupInv, noName, stripped,
     matchedRows: updates.length,
     updatedVms: updates.reduce((a, u) => a + u.targets.length, 0),
     added: adds.length,
@@ -1689,6 +1732,8 @@ function syncModeUi(mapped) {
   if (uf) uf.hidden = sel.value !== 'merge';
   const mk = $('#mapMatchKeyField');
   if (mk) mk.hidden = sel.value !== 'merge';
+  const si = $('#mapStripIdField');
+  if (si) si.hidden = sel.value !== 'merge';
   /* in merge mode only the name column is required — hide the other required markers */
   $('#mapGrid').classList.toggle('merge', sel.value === 'merge');
   return sel.value;
@@ -1725,7 +1770,7 @@ function refreshPreview() {
   const b = (mode === built.mode) ? built : buildImport();
   const ent = b.entries, miss = b.missing, wrn = b.warns.slice();
   const merge = mode === 'merge';
-  const plan = merge ? planMerge(ent, unmatchedAction(), b.effectiveMatchMode) : null;
+  const plan = merge ? planMerge(ent, unmatchedAction(), b.effectiveMatchMode, stripIdEnabled()) : null;
 
   const unchanged = '<span class="dash" title="left unchanged">unchanged</span>';
   /* rows that will be inserted as new VMs show their real (defaulted) values;
@@ -1742,7 +1787,7 @@ function refreshPreview() {
   const action = e => {
     if (!e.name) return '<span class="tag skip">skip</span>';
     const hit = (plan.updates.find(u => u.entry.matchKey === e.matchKey) || {});
-    if (hit.targets && hit.entry === e) return `<span class="tag upd">update${hit.targets.length > 1 ? ' ×' + hit.targets.length : ''}</span>`;
+    if (hit.targets && hit.entry === e) return `<span class="tag upd">update${hit.targets.length > 1 ? ' ×' + hit.targets.length : ''}${hit.viaStrip ? ' · ID stripped' : ''}</span>`;
     if (hit.targets) return '<span class="tag skip">superseded</span>';
     if (plan.adds.includes(e)) return '<span class="tag new">add new</span>';
     const dup = plan.dupCsv.length && ent.some(o => o !== e && o.matchKey === e.matchKey && ent.indexOf(o) > ent.indexOf(e));
@@ -1790,6 +1835,7 @@ function refreshPreview() {
     if (b.matchModeDowngraded) msgs.push(`<strong>Note:</strong> “Name + location” matching needs a mapped location column — matching by name only until one is mapped.`);
     if (plan.dupCsv.length) msgs.push(`<strong>Duplicate row${plan.dupCsv.length > 1 ? 's' : ''} in CSV:</strong> ${plan.dupCsv.slice(0, 5).map(esc).join(', ')}${plan.dupCsv.length > 5 ? ` …+${plan.dupCsv.length - 5}` : ''} — the last row for each match wins.`);
     if (plan.dupInv.length) msgs.push(`<strong>Multiple existing VMs share the same ${matchDesc}:</strong> ${plan.dupInv.slice(0, 5).map(d => esc(d.name) + ' ×' + d.n).join(', ')} — every match will be updated.`);
+    if (plan.stripped.length) msgs.push(`<strong>${plan.stripped.length} row${plan.stripped.length > 1 ? 's' : ''} matched after stripping a trailing vCenter ID:</strong> ${plan.stripped.slice(0, 5).map(esc).join(', ')}${plan.stripped.length > 5 ? ` …+${plan.stripped.length - 5}` : ''} — flagged <span class="mono">· ID stripped</span> in the preview below.`);
     if (plan.unmatched.length) msgs.push(`<strong>${plan.unmatched.length} row${plan.unmatched.length > 1 ? 's' : ''} with no matching VM:</strong> ${plan.unmatched.slice(0, 5).map(esc).join(', ')}${plan.unmatched.length > 5 ? ` …+${plan.unmatched.length - 5}` : ''} — will be ${unmatchedAction() === 'add' ? 'added as new VMs' : 'skipped'}.`);
   }
   if (wrn.length) msgs.push(`<strong>${wrn.length} row note${wrn.length > 1 ? 's' : ''}:</strong><br>` + wrn.slice(0, 6).map(esc).join('<br>') + (wrn.length > 6 ? `<br>…and ${wrn.length - 6} more.` : ''));
@@ -1815,6 +1861,7 @@ function renderImportSummary() {
   if (s.unmatched && s.unmatched.length) notes.push(`No inventory match for ${s.unmatched.slice(0, 5).map(esc).join(', ')}${s.unmatched.length > 5 ? ` …and ${s.unmatched.length - 5} more` : ''} — ${s.action === 'add' ? 'added as new VMs' : 'skipped'}.`);
   if (s.dupCsv && s.dupCsv.length) notes.push(`CSV had duplicate name${s.dupCsv.length > 1 ? 's' : ''} (${s.dupCsv.slice(0, 5).map(esc).join(', ')}) — last row won.`);
   if (s.dupInv && s.dupInv.length) notes.push(`Inventory has duplicate name${s.dupInv.length > 1 ? 's' : ''} (${s.dupInv.map(d => esc(d.name) + ' ×' + d.n).join(', ')}) — all matches were updated.`);
+  if (s.stripped && s.stripped.length) notes.push(`${s.stripped.length} row${s.stripped.length > 1 ? 's' : ''} matched after stripping a trailing vCenter ID (${s.stripped.slice(0, 5).map(esc).join(', ')}${s.stripped.length > 5 ? ` …and ${s.stripped.length - 5} more` : ''}).`);
   if (s.noName) notes.push(`${s.noName} row${s.noName > 1 ? 's' : ''} had no name and could not be matched.`);
   if (s.fields && s.fields.length) notes.push(`Fields written: <span class="mono">${s.fields.map(esc).join(', ')}</span>. All other fields left untouched.`);
   box.innerHTML = `<div class="imp-row">
@@ -2401,7 +2448,7 @@ function initEvents() {
     if (e.target.dataset.map === 'drGb') $('#mapDrUnit').value = guessUnit(e.target.value, 'disk');
     refreshPreview();
   });
-  ['#mapDiskUnit', '#mapRamUnit', '#mapDrUnit', '#mapRatio', '#mapStorage', '#mapLocation', '#mapMode', '#mapMatchKey', '#mapUnmatched'].forEach(s => $(s).addEventListener('change', refreshPreview));
+  ['#mapDiskUnit', '#mapRamUnit', '#mapDrUnit', '#mapRatio', '#mapStorage', '#mapLocation', '#mapMode', '#mapMatchKey', '#mapStripId', '#mapUnmatched'].forEach(s => $(s).addEventListener('change', refreshPreview));
   $('#mapLocation').addEventListener('input', refreshPreview);
   $$('#mapModal [data-close]').forEach(b => b.addEventListener('click', () => { $('#mapModal').hidden = true; pending = null; }));
   $('#mapModal').addEventListener('click', e => { if (e.target.id === 'mapModal') { $('#mapModal').hidden = true; pending = null; } });
@@ -2410,7 +2457,7 @@ function initEvents() {
     if (mode === 'merge') {
       if (!m.name) return toast('Map the VM name column to merge.', true);
       const action = unmatchedAction();
-      const plan = planMerge(entries, action, effectiveMatchMode);
+      const plan = planMerge(entries, action, effectiveMatchMode, stripIdEnabled());
       if (!plan.updatedVms && !plan.added) return toast('Nothing to merge with the current mapping.', true);
       // update matched VMs in place — only the mapped fields are written
       plan.updates.forEach(u => u.targets.forEach(v => Object.assign(v, u.entry.patch)));
@@ -2420,7 +2467,7 @@ function initEvents() {
         title: 'CSV merge complete', action,
         updated: plan.updatedVms, added: plan.added, skipped: plan.skipped,
         unmatched: plan.unmatched, dupCsv: plan.dupCsv, dupInv: plan.dupInv,
-        noName: plan.noName.length, fields
+        noName: plan.noName.length, fields, stripped: plan.stripped
       };
       $('#mapModal').hidden = true; pending = null;
       renderVms(); commit('inventory');
