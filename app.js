@@ -459,7 +459,7 @@ function tagBoxHtml(v) {
   const label = esc(v.name || 'this VM');
   return `<div class="token-box" data-tagbox="${v.id}">
     ${tags.map(t => `<span class="tag-chip">${esc(t)}<button type="button" class="chip-x" data-tagdel="${esc(t)}" aria-label="Remove tag ${esc(t)} from ${label}" title="Remove tag">✕</button></span>`).join('')}
-    <input class="in tag-input" data-tagadd list="tagList" placeholder="${tags.length ? '+ tag' : 'Add tag…'}" aria-label="Add a tag to ${label}" autocomplete="off" maxlength="${TAG_MAX_LEN}">
+    <input class="in tag-input" data-tagadd list="tagList" placeholder="${tags.length ? '+ tag' : 'Add tag…'}" aria-label="Add a tag to ${label}" autocomplete="off">
   </div>`;
 }
 /* Adds whatever is typed in a row's tag input to that VM. */
