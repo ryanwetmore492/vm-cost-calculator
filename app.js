@@ -1439,13 +1439,24 @@ const FIELDS = [
   { key: 'disk', label: 'Provisioned disk', req: true, hints: ['disk', 'disk_gb', 'disk gb', 'provisioned', 'provisioned mb', 'provisioned mib', 'storage', 'total disk capacity', 'capacity', 'in use mb', 'allocated'],
     /* a DR/replication size column is not the provisioned-disk column, and neither is a
        storage *profile/policy* name (e.g. Cloud Director's "Storage Profile Name" or
-       "Default Storage Policy Name") — those are tier labels, not a size in MB/GB. */
-    avoid: /\b(dr|zerto|journal|replica|draas)\b|disaster recovery|replication|profile|policy/ },
-  { key: 'location', label: 'Location (optional)', req: false, hints: ['location', 'site', 'datacenter', 'data center', 'dc', 'data centre', 'facility', 'region', 'site name', 'dc name', 'location name'] },
+       "Default Storage Policy Name") — those are tier labels, not a size in MB/GB.
+       Zerto Analytics' own VM report has two storage columns of its own — "Used
+       storage" (the replicated footprint, belongs to DR storage GB) and "Provisioned
+       storage" (the VPG's replication-target allocation) — neither is the VM's real
+       provisioned disk, so both are excluded here rather than silently overwriting it. */
+    avoid: /\b(dr|zerto|journal|replica|draas)\b|disaster recovery|replication|profile|policy|used storage|provisioned storage/ },
+  { key: 'location', label: 'Location (optional)', req: false, hints: ['location', 'site', 'datacenter', 'data center', 'dc', 'data centre', 'facility', 'region', 'site name', 'dc name', 'location name'],
+    /* Zerto's "Protected Site"/"Recovery site" name a replication direction, not the
+       VM's actual data center — leave unmapped rather than overwrite a real location. */
+    avoid: /protected site|recovery site/ },
   { key: 'drFlag', label: 'Zerto DR protected (optional)', req: false, hints: ['zerto', 'dr', 'dr protected', 'dr flag', 'disaster recovery', 'replicated', 'replication', 'protected', 'zerto protected', 'zerto dr', 'draas'],
-    /* never grab a size column (“DR Storage GB”, “Journal MB”…) as the on/off flag */
-    avoid: /\b(gb|mb|tb|gib|mib|tib)\b|size|capacity|journal|replica/ },
-  { key: 'drGb', label: 'DR storage (optional)', req: false, hints: ['dr gb', 'dr storage', 'dr storage gb', 'zerto gb', 'journal', 'journal gb', 'replica', 'replica gb', 'dr size', 'replication gb', 'dr capacity'] },
+    /* never grab a size column (“DR Storage GB”, “Journal MB”…) as the on/off flag,
+       and never grab a *site name* column just because it contains "protected" —
+       parseDrFlag() only recognises a small yes/no-style whitelist, so a real site
+       name like "Expedient Enterprise Cloud - CMH2" would parse as false for every
+       row and silently force DR off across the whole merge. */
+    avoid: /\b(gb|mb|tb|gib|mib|tib)\b|size|capacity|journal|replica|protected site|recovery site/ },
+  { key: 'drGb', label: 'DR storage (optional)', req: false, hints: ['dr gb', 'dr storage', 'dr storage gb', 'zerto gb', 'journal', 'journal gb', 'replica', 'replica gb', 'dr size', 'replication gb', 'dr capacity', 'used storage'] },
   { key: 'ratio', label: 'Ratio tier (optional)', req: false, hints: ['ratio', 'ratio tier', 'processor ratio', 'tier', 'compute tier'] },
   /* the bare word "policy" is too generic — it also matches unrelated boolean/ID columns
      like "Is Compute Policy Compliant" or "VM Placement Policy ID"; "storage policy" and
