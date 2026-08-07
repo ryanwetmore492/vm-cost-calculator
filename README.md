@@ -180,6 +180,17 @@ The VM inventory table also has the same drag-resizable columns as Results (drag
 to auto-fit one column, **Reset column widths** to auto-fit all of them) — minus column show/hide and frozen
 columns, which inventory doesn't have. Widths are saved per client profile the same way.
 
+### Sticky header row
+
+Both tables cap their own height at 70% of the viewport and scroll internally past that — the header row stays
+pinned to the top of that box the whole time, so a long VM list never scrolls its column labels out of view.
+This is a deliberate self-contained scroll region rather than plain CSS `position: sticky` on the header alone:
+the tables also need `overflow-x: auto` for the horizontal-scroll feature above, and a sticky element only sticks
+within its *nearest ancestor that clips overflow* — with no height cap, that ancestor never actually scrolls, so
+the header has nothing to stick to and just scrolls away with the page. Capping the height gives it one. Short
+lists are unaffected (the cap only kicks in once content actually exceeds it) and `Print / PDF` un-caps both
+tables so the exported page still shows every row, not just whatever was scrolled into view at the time.
+
 ### Row selection
 
 Selection is session-only (never persisted) and is **kept** when filters, location or sort change, so narrowing

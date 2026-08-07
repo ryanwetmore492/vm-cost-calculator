@@ -177,6 +177,15 @@ main{padding:var(--space-6) clamp(var(--space-4),3vw,var(--space-10)); max-width
 
 /* ---------- tables ---------- */
 .table-scroll{overflow-x:auto;-webkit-overflow-scrolling:touch}
+/* Results and VM inventory: bounded-height, independently vertically scrolling.
+   position:sticky on thead th (below) needs a real scrolling ancestor to stick
+   within — .table-scroll's overflow-x:auto already technically qualifies (overflow-y
+   computes to auto too, per spec, once one axis isn't visible), but since the box's
+   height is otherwise unbounded (hugs its content), that "scrollport" never actually
+   scrolls and the header never clamps to it. Capping the height here is what makes
+   the header truly stick while a long VM list scrolls, instead of scrolling the
+   whole page. */
+.scroll-tall{max-height:70vh;overflow-y:auto}
 table{width:100%;border-collapse:collapse;font-size:var(--text-xs)}
 thead th{
   text-align:left;font-weight:700;font-size:var(--text-2xs);letter-spacing:.08em;text-transform:uppercase;color:var(--text-faint);
@@ -248,7 +257,6 @@ tfoot td.label{font-family:var(--font-sans);text-transform:uppercase;letter-spac
 .res-table.cols-fixed{table-layout:fixed}
 .res-table .spacer{padding:0;border-left:0}
 .res-table.cols-fixed th,.res-table.cols-fixed td{overflow:hidden;text-overflow:ellipsis}
-.res-table th{position:sticky;top:0}
 .res-table th .col-resizer{
   position:absolute;top:0;right:0;bottom:0;width:11px;cursor:col-resize;
   touch-action:none;z-index:3;background:transparent;
@@ -267,7 +275,6 @@ body.col-resizing *{cursor:col-resize!important}
 .vm-table.cols-fixed{table-layout:fixed}
 .vm-table .spacer{padding:0;border-left:0}
 .vm-table.cols-fixed th,.vm-table.cols-fixed td{overflow:hidden;text-overflow:ellipsis}
-.vm-table th{position:relative}
 .vm-table th .col-resizer{
   position:absolute;top:0;right:0;bottom:0;width:11px;cursor:col-resize;
   touch-action:none;z-index:3;background:transparent;
@@ -286,6 +293,15 @@ body.col-resizing *{cursor:col-resize!important}
 .vm-table .w-sel input[type=checkbox]:focus-visible{outline:2px solid var(--primary);outline-offset:2px}
 .vm-table thead th.w-sel .col-resizer{display:none}
 .vm-table tbody tr.rowsel-on{background:var(--primary-soft)}
+
+/* ---------- sticky header row, both long-list tables ----------
+   The generic `thead th` rule (top of this file) already makes every table's
+   header position:sticky at top:0, which is correct here now that .scroll-tall
+   (above) makes .table-scroll itself the header's scrolling ancestor — top:0
+   pins it to the top of that box as it scrolls internally. z-index is bumped
+   above the frozen-column body cells (3) so they don't paint over the header as
+   rows scroll past underneath it. */
+.res-table thead th, .vm-table thead th{z-index:4}
 
 /* frozen left columns (# and Name) */
 .res-table td.stick,.res-table th.stick{position:sticky;z-index:3}
@@ -619,6 +635,8 @@ body.xbar-on .foot{padding-bottom:calc(var(--space-5) + var(--xbar-h))} /* never
   #filterPanel,#selBar,#tagModal,#exportModal,#colModal,#xbar{display:none!important}
   .res-table{table-layout:auto!important;width:100%!important}
   .res-table col{width:auto!important}
+  .scroll-tall{max-height:none!important;overflow:visible!important} /* full table on paper, not just the scrolled-into-view slice */
+  .res-table thead th{position:static!important}
   .res-table .stick{position:static!important;box-shadow:none!important;background:transparent!important}
   .res-table .w-sel input{display:none!important} /* keep the column (tfoot colspans depend on it), drop the control */
   .res-table tbody tr.rowsel-on{background:transparent!important}
