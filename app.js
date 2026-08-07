@@ -1237,7 +1237,7 @@ function initXbar() {
   thumb.addEventListener('pointerdown', e => {
     const sc = tableScroller(); if (!sc) return;
     drag = { x: e.clientX, start: sc.scrollLeft, tw: track.clientWidth, thw: thumb.offsetWidth, max: sc.scrollWidth - sc.clientWidth };
-    thumb.setPointerCapture(e.pointerId);
+    try { thumb.setPointerCapture(e.pointerId); } catch (err) { /* not fatal — same as the column resizer's capture */ }
     track.classList.add('dragging');
     track.focus(); // keyboard paging keeps working after a drag
     e.preventDefault();

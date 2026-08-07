@@ -578,6 +578,19 @@ body.xbar-on .foot{padding-bottom:calc(var(--space-5) + var(--xbar-h))} /* never
   .xbar-thumb{min-width:56px}
 }
 @media print{
+  /* Printing must always look like the light theme, regardless of which theme is
+     active on screen — component rules below only patch a couple of properties
+     (box-shadow, one border), but cards/tables/badges/KPI accents are all built on
+     these variables, so leaving dark-theme values in place printed a mostly-dark,
+     hard-to-read page whenever the (default) dark theme was active. */
+  :root{
+    --bg:#f4f6f8; --surface:#ffffff; --surface-2:#f7f9fb; --surface-3:#eef2f6;
+    --border:#dbe3ea; --border-strong:#c3cfda; --text:#131a21; --text-muted:#5a6b79; --text-faint:#8899a6;
+    --primary:#0d7d75; --primary-dim:#0a6159; --primary-soft:rgba(13,125,117,.09);
+    --amber:#a26411; --violet:#5b53c4; --blue:#1c6ea8; --danger:#b8353a; --success:#2f7a4d;
+    --shadow:0 1px 2px rgba(16,24,32,.06), 0 10px 24px rgba(16,24,32,.07);
+    --grid-line:rgba(20,40,60,.045); --stick-shadow:14px 0 16px -10px rgba(16,24,32,.34);
+  }
   .topbar,.tabs,.head-btns,.foot,.toast-wrap,#tierRollup,#locFilterBar,#impSummary,
   #filterPanel,#selBar,#tagModal,#exportModal,#colModal,#xbar{display:none!important}
   .res-table{table-layout:auto!important;width:100%!important}
