@@ -280,6 +280,13 @@ body.col-resizing *{cursor:col-resize!important}
 .vm-table th .col-resizer:hover::after,.vm-table.resizing th .col-resizer::after{background:var(--primary)}
 .vm-table.resizing{user-select:none}
 
+/* ---------- VM inventory table: row selection ---------- */
+.vm-table th.w-sel,.vm-table td.w-sel{width:44px;text-align:center;padding-left:.35rem;padding-right:.35rem}
+.vm-table .w-sel input[type=checkbox]{width:18px;height:18px;accent-color:var(--primary);margin:0;cursor:pointer}
+.vm-table .w-sel input[type=checkbox]:focus-visible{outline:2px solid var(--primary);outline-offset:2px}
+.vm-table thead th.w-sel .col-resizer{display:none}
+.vm-table tbody tr.rowsel-on{background:var(--primary-soft)}
+
 /* frozen left columns (# and Name) */
 .res-table td.stick,.res-table th.stick{position:sticky;z-index:3}
 .res-table td.stick{background:var(--surface)}

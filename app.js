@@ -199,7 +199,11 @@ function syncLocationDatalist() {
 let state = load();
 let locFilter = ''; // '' = all locations
 let pending = null; // csv import staging
-let selected = new Set(); // Cost breakdown row selection (vm ids, session-only)
+let selected = new Set(); // VM row selection (vm ids, session-only) — shared by Results' tag actions and Inventory's bulk actions
+function pruneSelection() {
+  const live = new Set(VMS().map(v => v.id));
+  Array.from(selected).forEach(id => { if (!live.has(id)) selected.delete(id); });
+}
 
 function load() {
   try {
@@ -445,6 +449,7 @@ function renderVms() {
   $('#vmEmpty').hidden = vms.length > 0;
   $('#vmTable').hidden = vms.length === 0;
   $('#bulkBar').hidden = vms.length === 0;
+  $('#vmSelBar').hidden = vms.length === 0;
   $('#addonHead').hidden = p.addons.length === 0;
 
   const rOpts = v => p.ratios.map(r => `<option value="${r.id}" ${v === r.id ? 'selected' : ''}>${esc(r.label || r.name)} — $${num(r.price)}/GB</option>`).join('');
@@ -452,7 +457,8 @@ function renderVms() {
   const dOpts = v => p.dr.storageTiers.map(s => `<option value="${s.id}" ${v === s.id ? 'selected' : ''}>${esc(shortTier(s.name))} — $${drRateNum(s.price)}/GB</option>`).join('');
 
   $('#vmTable tbody').innerHTML = vms.map((v, i) => `
-    <tr data-id="${v.id}">
+    <tr data-id="${v.id}"${selected.has(v.id) ? ' class="rowsel-on"' : ''}>
+      <td class="w-sel"><input type="checkbox" class="rowsel" data-id="${v.id}" ${selected.has(v.id) ? 'checked' : ''} aria-label="Select ${esc(v.name || '(unnamed)')} for bulk actions"></td>
       <td class="w-idx mono">${i + 1}</td>
       <td><input class="in" data-f="name" value="${esc(v.name)}" placeholder="vm-name" aria-label="VM name"></td>
       <td><div class="os-field"><input class="in" data-f="os" list="osList" value="${esc(v.os)}" placeholder="Operating system" aria-label="Operating system">${isWin(v.os) ? '<span class="badge" title="Windows SPLA applies">SPLA</span>' : ''}</div></td>
@@ -486,11 +492,40 @@ function renderVms() {
     document.body.appendChild(dl);
   }
   const bulkR = $('#bulkRatio'), bulkS = $('#bulkStorage'), bulkDS = $('#bulkDrStorage');
-  bulkR.innerHTML = '<option value="">Set ratio tier for all…</option>' + p.ratios.map(r => `<option value="${r.id}">${esc(r.label || r.name)}</option>`).join('');
+  const n = selected.size;
+  bulkR.innerHTML = `<option value="">Set ratio tier for ${n ? 'selected' : 'all'}…</option>` + p.ratios.map(r => `<option value="${r.id}">${esc(r.label || r.name)}</option>`).join('');
   $('#bulkDr').value = '';
-  bulkS.innerHTML = '<option value="">Set storage tier for all…</option>' + p.storage.map(s => `<option value="${s.id}">${esc(shortTier(s.name))} — ${esc(rateStr(s))}</option>`).join('');
-  bulkDS.innerHTML = '<option value="">Set DR storage tier for all…</option>' + p.dr.storageTiers.map(s => `<option value="${s.id}">${esc(shortTier(s.name))} — $${drRateNum(s.price)}/GB</option>`).join('');
+  bulkS.innerHTML = `<option value="">Set storage tier for ${n ? 'selected' : 'all'}…</option>` + p.storage.map(s => `<option value="${s.id}">${esc(shortTier(s.name))} — ${esc(rateStr(s))}</option>`).join('');
+  bulkDS.innerHTML = `<option value="">Set DR storage tier for ${n ? 'selected' : 'all'}…</option>` + p.dr.storageTiers.map(s => `<option value="${s.id}">${esc(shortTier(s.name))} — $${drRateNum(s.price)}/GB</option>`).join('');
+  refreshBulkBarLabels();
   syncVmColW();
+}
+/* ================= VM inventory: row selection (shared with Results' tag bulk actions) =================
+   Bulk-apply option text, the "Clear all" button and the selection bar all read the
+   same `selected` set, so they stay in sync whether triggered by a full renderVms()
+   (structural changes) or the lightweight row-checkbox toggle below (keystroke-safe —
+   it must not blow away an in-progress edit elsewhere in the table). */
+function refreshBulkBarLabels() {
+  const n = selected.size, word = n ? 'selected' : 'all';
+  ['#bulkRatio', '#bulkStorage', '#bulkDrStorage', '#bulkDr'].forEach(sel => {
+    const opt = $(sel).querySelector('option[value=""]');
+    if (opt) opt.textContent = opt.textContent.replace(/\b(all|selected)(?=…)/, word);
+  });
+  $('#bulkLocation').placeholder = `Location for ${word} VM${n === 1 ? '' : 's'}…`;
+  $('#bulkBarLabel').textContent = n ? `Bulk apply to ${n} selected VM${n === 1 ? '' : 's'}:` : 'Bulk apply to all VMs:';
+  $('#btnClearVms').textContent = n ? `Delete selected (${n})` : 'Clear all';
+  renderVmSelBar();
+}
+function renderVmSelBar() {
+  const vms = VMS(), n = selected.size;
+  $('#vmSelCount').textContent = `${n} VM${n === 1 ? '' : 's'} selected`;
+  $('#vmSelHint').textContent = n
+    ? 'Bulk actions below apply to the selected VMs only.'
+    : (vms.length ? 'Tick rows to limit bulk actions to a subset — with nothing selected, they apply to all VMs.' : '');
+  $('#btnVmSelClear').disabled = n === 0;
+  const allCb = $('#vmSelAll');
+  allCb.checked = vms.length > 0 && n === vms.length;
+  allCb.indeterminate = n > 0 && n < vms.length;
 }
 const shortTier = n => String(n).replace(/^Enterprise Cloud Storage\s*[—-]\s*/i, '');
 
@@ -801,8 +836,7 @@ function renderFilterSummary(V) {
 /* ================= Cost breakdown: row selection + bulk tagging ================= */
 function renderSelBar(V) {
   const visibleIds = V.rows.map(r => r.vm.id);
-  const live = new Set(VMS().map(v => v.id));
-  Array.from(selected).forEach(id => { if (!live.has(id)) selected.delete(id); }); // deleted VMs drop out
+  pruneSelection(); // deleted VMs drop out
   const n = selected.size;
   const hidden = Array.from(selected).filter(id => !visibleIds.includes(id)).length;
   $('#selCount').textContent = `${n} VM${n === 1 ? '' : 's'} selected`;
@@ -1052,6 +1086,7 @@ function renderTab(name) {
 }
 /* chrome = UI shared by every tab: client picker, inventory count badge, location autocomplete */
 function renderChrome() {
+  pruneSelection();
   renderClients();
   $('#vmCountPill').textContent = VMS().length;
   syncLocationDatalist();
@@ -1479,11 +1514,11 @@ function initColResize() {
    Add-ons, Actions — Add-ons is the only one that's ever hidden (no add-on SKUs
    configured), so its width still has to be tracked by a stable index even while
    absent, the same way COLS' hidden columns are. */
-const VM_COL_COUNT = 14;
-const VM_ADDON_IDX = 12;
+const VM_COL_COUNT = 15;
+const VM_ADDON_IDX = 13;
 const vmColVisible = i => i !== VM_ADDON_IDX || P().addons.length > 0;
 const vmVisIdx = () => Array.from({ length: VM_COL_COUNT }, (_, i) => i).filter(vmColVisible);
-const VM_COLW_MIN = i => ([40, 170, 210, 185, 90, 90, 90, 100, 170, 170, 170, 170, 150, 70][i] ?? 80);
+const VM_COLW_MIN = i => ([44, 40, 170, 210, 185, 90, 90, 90, 100, 170, 170, 170, 170, 150, 70][i] ?? 80);
 const vmResHeads = () => $$('#vmTable thead th:not(.spacer)');
 function savedVmColW() {
   const w = ui().vmColW;
@@ -2254,6 +2289,13 @@ let tagDraft = [];
 function selectedVms() {
   return VMS().filter(v => selected.has(v.id));
 }
+/* Inventory's "bulk apply" controls: scoped to the selection when one exists,
+   otherwise every VM — so the existing "apply to all" behavior survives untouched
+   when nothing is selected. */
+const bulkTargets = () => selected.size ? selectedVms() : VMS().slice();
+const bulkScopeLabel = targets => selected.size
+  ? `${targets.length} selected VM${targets.length === 1 ? '' : 's'}`
+  : `all ${targets.length} VM${targets.length === 1 ? '' : 's'}`;
 function openTagModal(mode) {
   const targets = selectedVms();
   if (!targets.length) return toast('Select at least one row first.', true);
@@ -2428,6 +2470,14 @@ function initEvents() {
     commit('inventory');
   });
   vmt.addEventListener('change', e => {
+    const cb = e.target.closest('.rowsel');
+    if (cb) {
+      // selection is session-only (not persisted VM data) — skip commit()'s save/re-render, just patch the UI
+      if (cb.checked) selected.add(cb.dataset.id); else selected.delete(cb.dataset.id);
+      cb.closest('tr').classList.toggle('rowsel-on', cb.checked);
+      refreshBulkBarLabels();
+      return;
+    }
     const tr = e.target.closest('tr[data-id]'); if (!tr) return;
     const vm = VMS().find(v => v.id === tr.dataset.id); if (!vm) return;
     if (e.target.dataset.f === 'location') syncLocationDatalist(); // refresh autocomplete after edit
@@ -2483,47 +2533,68 @@ function initEvents() {
     const rows = $$('#vmTable tbody tr'); const last = rows[rows.length - 1];
     if (last) last.querySelector('[data-f="name"]').focus();
   });
+  $('#vmSelAll').addEventListener('change', e => {
+    const ids = VMS().map(v => v.id);
+    if (e.target.checked) ids.forEach(id => selected.add(id));
+    else ids.forEach(id => selected.delete(id));
+    renderVms();
+  });
+  $('#btnVmSelVisible').addEventListener('click', () => { VMS().forEach(v => selected.add(v.id)); renderVms(); });
+  $('#btnVmSelClear').addEventListener('click', () => { selected.clear(); renderVms(); });
   $('#btnClearVms').addEventListener('click', () => {
-    if (!VMS().length) return;
-    if (!confirm(`Delete all ${VMS().length} VMs from “${active().name}”? Pricing configuration is kept.`)) return;
-    snapshotForUndo(`cleared ${VMS().length} VM${VMS().length === 1 ? '' : 's'}`);
-    active().vms = []; renderVms(); commit('inventory');
+    const targets = bulkTargets(); if (!targets.length) return;
+    const scoped = selected.size > 0, label = bulkScopeLabel(targets);
+    if (!confirm(`Delete ${label} from “${active().name}”? Pricing configuration is kept.`)) return;
+    snapshotForUndo(scoped ? `deleted ${targets.length} selected VM${targets.length === 1 ? '' : 's'}` : `cleared ${targets.length} VM${targets.length === 1 ? '' : 's'}`);
+    if (scoped) {
+      const ids = new Set(targets.map(v => v.id));
+      active().vms = VMS().filter(v => !ids.has(v.id));
+      selected.clear();
+    } else {
+      active().vms = [];
+    }
+    renderVms(); commit('inventory');
   });
   $('#bulkRatio').addEventListener('change', e => {
     if (!e.target.value) return;
-    snapshotForUndo('ratio tier applied to all VMs');
-    VMS().forEach(v => v.ratioId = e.target.value); e.target.value = ''; renderVms(); commit('inventory'); toast('Ratio tier applied to all VMs.');
+    const targets = bulkTargets(); if (!targets.length) return;
+    snapshotForUndo(`ratio tier applied to ${bulkScopeLabel(targets)}`);
+    targets.forEach(v => v.ratioId = e.target.value); e.target.value = ''; renderVms(); commit('inventory'); toast(`Ratio tier applied to ${bulkScopeLabel(targets)}.`);
   });
   $('#bulkStorage').addEventListener('change', e => {
     if (!e.target.value) return;
-    snapshotForUndo('storage tier applied to all VMs');
-    VMS().forEach(v => v.storageId = e.target.value); e.target.value = ''; renderVms(); commit('inventory'); toast('Storage tier applied to all VMs.');
+    const targets = bulkTargets(); if (!targets.length) return;
+    snapshotForUndo(`storage tier applied to ${bulkScopeLabel(targets)}`);
+    targets.forEach(v => v.storageId = e.target.value); e.target.value = ''; renderVms(); commit('inventory'); toast(`Storage tier applied to ${bulkScopeLabel(targets)}.`);
   });
   $('#bulkDrStorage').addEventListener('change', e => {
     if (!e.target.value) return;
-    snapshotForUndo('DR storage tier applied to all VMs');
-    VMS().forEach(v => v.drStorageId = e.target.value); e.target.value = ''; renderVms(); commit('inventory'); toast('DR storage tier applied to all VMs.');
+    const targets = bulkTargets(); if (!targets.length) return;
+    snapshotForUndo(`DR storage tier applied to ${bulkScopeLabel(targets)}`);
+    targets.forEach(v => v.drStorageId = e.target.value); e.target.value = ''; renderVms(); commit('inventory'); toast(`DR storage tier applied to ${bulkScopeLabel(targets)}.`);
   });
   $('#btnBulkLocation').addEventListener('click', () => {
     const val = String($('#bulkLocation').value || '').trim();
-    if (!VMS().length) return;
-    if (!confirm(val ? `Set location “${val}” on all ${VMS().length} VMs?` : `Clear the location on all ${VMS().length} VMs (they become “${UNASSIGNED}”)?`)) return;
-    snapshotForUndo(val ? `location set to “${val}” on all VMs` : 'location cleared on all VMs');
-    VMS().forEach(v => v.location = val);
+    const targets = bulkTargets(); if (!targets.length) return;
+    const label = bulkScopeLabel(targets);
+    if (!confirm(val ? `Set location “${val}” on ${label}?` : `Clear the location on ${label} (they become “${UNASSIGNED}”)?`)) return;
+    snapshotForUndo(val ? `location set to “${val}” on ${label}` : `location cleared on ${label}`);
+    targets.forEach(v => v.location = val);
     $('#bulkLocation').value = '';
     renderVms(); commit('inventory');
-    toast(val ? `Location “${val}” applied to all VMs.` : 'Location cleared on all VMs.');
+    toast(val ? `Location “${val}” applied to ${label}.` : `Location cleared on ${label}.`);
   });
   $('#bulkDr').addEventListener('change', e => {
     const v = e.target.value; e.target.value = '';
-    if (!v || !VMS().length) return;
-    const on = v === 'on';
-    if (!confirm(on ? `Enable Zerto DR on all ${VMS().length} VMs? Enter each VM’s DR storage GB afterwards.`
-      : `Disable Zerto DR on all ${VMS().length} VMs? Their DR storage GB values will be cleared.`)) return;
-    snapshotForUndo(on ? 'Zerto DR enabled on all VMs' : 'Zerto DR disabled on all VMs');
-    VMS().forEach(x => { x.dr = on; if (!on) x.drGb = 0; });
+    if (!v) return;
+    const targets = bulkTargets(); if (!targets.length) return;
+    const on = v === 'on', label = bulkScopeLabel(targets);
+    if (!confirm(on ? `Enable Zerto DR on ${label}? Enter each VM’s DR storage GB afterwards.`
+      : `Disable Zerto DR on ${label}? Their DR storage GB values will be cleared.`)) return;
+    snapshotForUndo(on ? `Zerto DR enabled on ${label}` : `Zerto DR disabled on ${label}`);
+    targets.forEach(x => { x.dr = on; if (!on) x.drGb = 0; });
     renderVms(); commit('inventory');
-    toast(on ? 'Zerto DR enabled on all VMs.' : 'Zerto DR disabled on all VMs.');
+    toast(on ? `Zerto DR enabled on ${label}.` : `Zerto DR disabled on ${label}.`);
   });
   /* Location change keeps the selection intact — the selection bar reports how
      many selected rows are currently hidden. */
