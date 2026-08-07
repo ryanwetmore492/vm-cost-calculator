@@ -15,7 +15,7 @@ A reusable, pure client-side web app for calculating monthly cost per VM in a VM
   - Custom add-ons priced per VM, per GB RAM, or per TB disk
   - Configurable GB→TB divisor (1024 or 1000)
 - **VM inventory** — manual entry or CSV import with a column-mapping step (auto-detects RVTools / Cloud Director headers, MB/GB/TB units, location columns, Zerto DR flag, DR storage and DR storage tier columns), per-VM ratio tier, storage tier, data center location, **Zerto DR toggle with a manually entered DR storage (GB) value and its own DR storage tier picker**, and add-ons. The table has the same **drag-resizable columns** (with a "Reset column widths" auto-fit) and **sticky horizontal scrollbar pinned to the bottom of the viewport** as the Cost breakdown table, so a wide inventory or a long VM list can be panned sideways without scrolling to either edge first.
-- **Row selection for bulk actions** — a checkbox column (plus a header "select all" and a selection bar with **Select all** / **Clear selection**) lets you tick a subset of VMs on the Inventory tab. The "Bulk apply" controls (ratio tier, storage tier, DR storage tier, location, Zerto DR, and **Delete selected**) scope themselves to the ticked VMs automatically — the label and every dropdown/placeholder relabel from "…for all" to "…for N selected", and with nothing ticked they still apply to every VM, unchanged from before. The selection is the same one used by the Cost breakdown tab's bulk tagging, so ticking VMs on either tab carries over to the other.
+- **Row selection for bulk actions** — a checkbox column (plus a header "select all" and a selection bar with **Add tags…**, **Select all** and **Clear selection**) lets you tick a subset of VMs on the Inventory tab. The "Bulk apply" controls (ratio tier, storage tier, DR storage tier, location, Zerto DR, and **Delete selected**) scope themselves to the ticked VMs automatically — the label and every dropdown/placeholder relabel from "…for all" to "…for N selected", and with nothing ticked they still apply to every VM, unchanged from before. **Add tags…** opens the same bulk tag modal as the Cost breakdown tab (see [Tags](#tags)) — Inventory only exposes adding, since Remove/Replace already live on Results and this is the same shared selection either tab can act on. The selection itself is that same shared set, so ticking VMs on either tab carries over to the other.
 - **CSV import modes** — every import ends in a mapping modal where you choose what happens to the existing inventory:
   - **Replace inventory** — discard the current VM list and use the file
   - **Append to inventory** — add the file's rows as new VMs
@@ -54,12 +54,15 @@ stored with the client profile, so every client has its own tag vocabulary.
 - *VM inventory tab* — each row has a chip editor. Type and press `Enter`, `;`, `,` or `|` to commit; blur also
   commits. Click a chip's `✕` to remove it, or press `Backspace` in an empty input to remove the last chip.
   Suggestions come from a datalist of the tags already used in the current profile — there is no separate catalog to maintain.
-- *Cost breakdown tab* — tick rows (or **Select all visible**) and use **Add tags…**, **Remove tags…** or
-  **Replace tags…**. The modal offers the profile's existing tags as one-click chips with usage counts.
-  **Replace** overwrites the whole tag list on every selected VM and is gated by a confirmation checkbox inside
-  the modal (the Apply button stays disabled until it is ticked); an empty list clears all tags. Bulk actions
-  apply to **every selected VM**, including ones currently hidden by a filter — the selection bar states how
-  many selected rows are hidden.
+  The same tab's selection bar also has **Add tags…** for tagging several VMs at once (see bulk actions below).
+- *Bulk actions, either tab* — tick rows (Cost breakdown: **Select all visible**; VM inventory: **Select all**) and
+  use **Add tags…**, **Remove tags…** or **Replace tags…** — Cost breakdown has all three, VM inventory only
+  **Add tags…** since it's the same shared selection and Remove/Replace are already one tab-switch away. The modal
+  offers the profile's existing tags as one-click chips with usage counts. **Replace** overwrites the whole tag
+  list on every selected VM and is gated by a confirmation checkbox inside the modal (the Apply button stays
+  disabled until it is ticked); an empty list clears all tags. Bulk actions apply to **every selected VM**,
+  including ones currently hidden by a Cost breakdown filter — that tab's selection bar states how many selected
+  rows are hidden.
 
 **CSV syntax**
 

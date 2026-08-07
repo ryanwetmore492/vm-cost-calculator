@@ -523,6 +523,7 @@ function renderVmSelBar() {
     ? 'Bulk actions below apply to the selected VMs only.'
     : (vms.length ? 'Tick rows to limit bulk actions to a subset — with nothing selected, they apply to all VMs.' : '');
   $('#btnVmSelClear').disabled = n === 0;
+  $('#btnVmTagAdd').disabled = n === 0;
   const allCb = $('#vmSelAll');
   allCb.checked = vms.length > 0 && n === vms.length;
   allCb.indeterminate = n > 0 && n < vms.length;
@@ -2381,7 +2382,8 @@ function applyTagAction() {
   });
   const verb = { add: 'tagged', remove: 'untagged', replace: 'retagged' }[tagMode];
   closeTagModal();
-  commit('inventory');
+  // force: tags change via this modal, not live typing, so the active tab always needs a fresh render
+  commit('inventory', { force: true });
   toast(changed
     ? `${changed} VM${changed === 1 ? '' : 's'} ${verb}.` + (over ? ` ${over} hit the ${TAG_MAX_PER_VM}-tag limit.` : '')
     : 'No VM needed a change.');
@@ -2541,6 +2543,7 @@ function initEvents() {
   });
   $('#btnVmSelVisible').addEventListener('click', () => { VMS().forEach(v => selected.add(v.id)); renderVms(); });
   $('#btnVmSelClear').addEventListener('click', () => { selected.clear(); renderVms(); });
+  $('#btnVmTagAdd').addEventListener('click', () => openTagModal('add'));
   $('#btnClearVms').addEventListener('click', () => {
     const targets = bulkTargets(); if (!targets.length) return;
     const scoped = selected.size > 0, label = bulkScopeLabel(targets);
