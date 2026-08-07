@@ -233,4 +233,6 @@ Open `index.html` in a browser, or serve the directory with any static file serv
 python3 -m http.server 8080
 ```
 
-When changing `app.js` or `styles.css`, bump the `?v=` cache-busting query string in `index.html`.
+When changing `app.js` or `styles.css`, bump the `?v=` cache-busting query string in `index.html` —
+and update the visible version badge in the topbar (`#appVersion` and its `title="Build …"` tooltip,
+right next to it) to match. There's no build step to keep these in sync automatically.

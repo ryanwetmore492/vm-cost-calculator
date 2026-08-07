@@ -8,6 +8,9 @@
 <link rel="preconnect" href="https://api.fontshare.com">
 <link href="https://api.fontshare.com/v2/css?f[]=satoshi@400,500,700&display=swap" rel="stylesheet">
 <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<!-- Bumping ?v= below? Also update the visible version text in .brand-sub (and its title="Build …"
+     tooltip) a few lines down — it's the only user-visible "what version am I on" indicator, and
+     since this is a build-less static site nothing keeps it in sync automatically. -->
 <link rel="stylesheet" href="styles.css?v=20260806-16">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%230b1015'/%3E%3Cg stroke='%2338d0c8' stroke-width='2.4' fill='none'%3E%3Crect x='7' y='7' width='18' height='7'/%3E%3Crect x='7' y='18' width='18' height='7'/%3E%3C/g%3E%3C/svg%3E">
 </head>
@@ -26,7 +29,7 @@
     </svg>
     <div class="brand-text">
       <span class="brand-title">VM Cost Calculator</span>
-      <span class="brand-sub">VMware Cloud Director · MSP billing model</span>
+      <span class="brand-sub">VMware Cloud Director · MSP billing model · <span id="appVersion" title="Build 20260806-16">v2026-08-06</span></span>
     </div>
   </div>
 
