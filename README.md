@@ -14,7 +14,7 @@ A reusable, pure client-side web app for calculating monthly cost per VM in a VM
   - **Disaster recovery (Zerto)** — an open-ended table of DR storage tiers, each priced per GB of replicated footprint (its own SKU, name and rate — add/remove tiers and set a default, same as storage tiers), plus a single flat Zerto replication fee per protected VM shared across all tiers (also editable SKU/name/rate). Each protected VM picks its own DR storage tier independently of its primary storage tier — useful when a client replicates some VMs to standard DR storage and others to a higher-performance tier.
   - Custom add-ons priced per VM, per GB RAM, or per TB disk
   - Configurable GB→TB divisor (1024 or 1000)
-- **VM inventory** — manual entry or CSV import with a column-mapping step (auto-detects RVTools / Cloud Director headers, MB/GB/TB units, location columns, Zerto DR flag, DR storage and DR storage tier columns), per-VM ratio tier, storage tier, data center location, **Zerto DR toggle with a manually entered DR storage (GB) value and its own DR storage tier picker**, and add-ons
+- **VM inventory** — manual entry or CSV import with a column-mapping step (auto-detects RVTools / Cloud Director headers, MB/GB/TB units, location columns, Zerto DR flag, DR storage and DR storage tier columns), per-VM ratio tier, storage tier, data center location, **Zerto DR toggle with a manually entered DR storage (GB) value and its own DR storage tier picker**, and add-ons. The table has the same **drag-resizable columns** (with a "Reset column widths" auto-fit) and **sticky horizontal scrollbar pinned to the bottom of the viewport** as the Cost breakdown table, so a wide inventory or a long VM list can be panned sideways without scrolling to either edge first.
 - **CSV import modes** — every import ends in a mapping modal where you choose what happens to the existing inventory:
   - **Replace inventory** — discard the current VM list and use the file
   - **Append to inventory** — add the file's rows as new VMs
@@ -153,10 +153,12 @@ Tick or untick individual columns, or apply a preset:
 ### Sticky horizontal scrollbar
 
 Wide tables are hard to pan when their native scrollbar sits far below the fold, so a second horizontal
-scrollbar pins itself to the bottom of the viewport. It appears only when all of the following are true:
+scrollbar pins itself to the bottom of the viewport. It follows whichever of the **Results** or **VM inventory**
+tables is on screen — one at a time, since only one tab is visible at once — and appears only when all of the
+following are true:
 
-- the **Results** tab is active and the table is rendered,
-- the table is actually overflowed horizontally,
+- the **Results** or **VM inventory** tab is active and its table is rendered,
+- that table is actually overflowed horizontally,
 - part of the table is on screen, and
 - the table's own bottom scrollbar is **not** in view (once it is, the sticky bar disappears — the native
   scrollbar is always preserved).
@@ -164,10 +166,15 @@ scrollbar pins itself to the bottom of the viewport. It appears only when all of
 It matches the table's left edge and width, mirrors the table's scroll position in both directions, and
 re-measures on window resize, column resize and column show/hide. The thumb is drawn rather than native, because
 overlay scrollbars (macOS, some Chrome builds) fade out and would leave an empty strip. It is a real
-`role="scrollbar"` control: focusable, with `aria-valuenow` and a live percentage readout, draggable, click-to-jump
-on the track, and `←` / `→` (hold `Shift` for a bigger step), `Page Up` / `Page Down`, `Home` and `End` from the
-keyboard. On touch-width screens it spans the full width and grows to a 40px bar with a 26px track. It never
-covers page controls, is pushed clear of the footer, and never prints.
+`role="scrollbar"` control: focusable, with `aria-valuenow` and a live percentage readout (and an `aria-label`
+naming whichever table it currently controls), draggable, click-to-jump on the track, and `←` / `→` (hold `Shift`
+for a bigger step), `Page Up` / `Page Down`, `Home` and `End` from the keyboard. On touch-width screens it spans
+the full width and grows to a 40px bar with a 26px track. It never covers page controls, is pushed clear of the
+footer, and never prints.
+
+The VM inventory table also has the same drag-resizable columns as Results (drag an edge to resize, double-click
+to auto-fit one column, **Reset column widths** to auto-fit all of them) — minus column show/hide and frozen
+columns, which inventory doesn't have. Widths are saved per client profile the same way.
 
 ### Row selection
 

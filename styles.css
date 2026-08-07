@@ -263,6 +263,23 @@ tfoot td.label{font-family:var(--font-sans);text-transform:uppercase;letter-spac
 body.col-resizing{cursor:col-resize}
 body.col-resizing *{cursor:col-resize!important}
 
+/* ---------- VM inventory table: resizable columns ---------- */
+.vm-table.cols-fixed{table-layout:fixed}
+.vm-table .spacer{padding:0;border-left:0}
+.vm-table.cols-fixed th,.vm-table.cols-fixed td{overflow:hidden;text-overflow:ellipsis}
+.vm-table th{position:relative}
+.vm-table th .col-resizer{
+  position:absolute;top:0;right:0;bottom:0;width:11px;cursor:col-resize;
+  touch-action:none;z-index:3;background:transparent;
+}
+.vm-table th .col-resizer::after{
+  content:'';position:absolute;top:18%;bottom:18%;right:4px;width:2px;border-radius:2px;
+  background:transparent;transition:background .12s ease;
+}
+.vm-table th:hover .col-resizer::after{background:var(--border-strong)}
+.vm-table th .col-resizer:hover::after,.vm-table.resizing th .col-resizer::after{background:var(--primary)}
+.vm-table.resizing{user-select:none}
+
 /* frozen left columns (# and Name) */
 .res-table td.stick,.res-table th.stick{position:sticky;z-index:3}
 .res-table td.stick{background:var(--surface)}

@@ -475,6 +475,7 @@ function renderVms() {
         <button class="btn row-x" data-dup title="Duplicate VM">⧉</button>
         <button class="btn row-x" data-del title="Delete VM">✕</button>
       </td>
+      <td class="spacer"></td>
     </tr>`).join('');
 
   syncLocationDatalist();
@@ -489,6 +490,7 @@ function renderVms() {
   $('#bulkDr').value = '';
   bulkS.innerHTML = '<option value="">Set storage tier for all…</option>' + p.storage.map(s => `<option value="${s.id}">${esc(shortTier(s.name))} — ${esc(rateStr(s))}</option>`).join('');
   bulkDS.innerHTML = '<option value="">Set DR storage tier for all…</option>' + p.dr.storageTiers.map(s => `<option value="${s.id}">${esc(shortTier(s.name))} — $${drRateNum(s.price)}/GB</option>`).join('');
+  syncVmColW();
 }
 const shortTier = n => String(n).replace(/^Enterprise Cloud Storage\s*[—-]\s*/i, '');
 
@@ -1219,12 +1221,16 @@ function closeColModal() {
    empty strip. Position flows one way in each direction: pointer/keyboard input
    writes the table's scrollLeft, and the table's scroll event repaints the
    thumb — so there is no scroll-event feedback loop. */
-const tableScroller = () => { const t = $('#resTable'); return t ? t.closest('.table-scroll') : null; };
+/* One table per tab can own the bar at a time — whichever one is behind the active tab. */
+const XBAR_TABLES = { results: { sel: '#resTable', label: 'Cost breakdown' }, inventory: { sel: '#vmTable', label: 'VM inventory' } };
+const xbarTableInfo = () => XBAR_TABLES[activeTab()] || null;
+const tableScroller = () => { const info = xbarTableInfo(); const t = info && $(info.sel); return t ? t.closest('.table-scroll') : null; };
 // bar height comes from the --xbar-h CSS variable so the media query can grow it on touch screens
 const XBAR_H = () => parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--xbar-h')) || 30;
 function xbarTarget() {
-  const sc = tableScroller(), t = $('#resTable');
-  if (!sc || !t || t.hidden || activeTab() !== 'results') return null;
+  const info = xbarTableInfo(); if (!info) return null;
+  const sc = tableScroller(), t = $(info.sel);
+  if (!sc || !t || t.hidden) return null;
   const max = sc.scrollWidth - sc.clientWidth;
   if (max < 2) return null; // nothing to scroll
   const r = sc.getBoundingClientRect();
@@ -1260,6 +1266,10 @@ function updateXbar() {
   const left = Math.max(0, Math.round(r.left));
   bar.style.left = left + 'px';
   bar.style.width = Math.round(Math.max(120, Math.min(r.width, vw - left))) + 'px';
+  const info = xbarTableInfo();
+  const track = $('#xbarTrack');
+  track.setAttribute('aria-controls', info.sel.slice(1));
+  track.setAttribute('aria-label', `${info.label} table horizontal scrollbar. Drag, or use the left and right arrow keys, Page Up, Page Down, Home or End.`);
   paintXbarThumb(sc, max);
 }
 let xbarQueued = false;
@@ -1276,8 +1286,9 @@ function xbarScrollTo(px) {
 }
 function initXbar() {
   const track = $('#xbarTrack'), thumb = $('#xbarThumb');
-  const sc0 = tableScroller();
-  if (sc0) sc0.addEventListener('scroll', queueXbar, { passive: true });
+  // both tables' scroll containers exist in the DOM from load, one per tab — wire up whichever's on screen
+  const scrollers = Object.values(XBAR_TABLES).map(info => { const t = $(info.sel); return t && t.closest('.table-scroll'); }).filter(Boolean);
+  scrollers.forEach(sc => sc.addEventListener('scroll', queueXbar, { passive: true }));
 
   let drag = null;
   thumb.addEventListener('pointerdown', e => {
@@ -1321,8 +1332,8 @@ function initXbar() {
   window.addEventListener('resize', queueXbar);
   if (window.ResizeObserver) {
     const ro = new ResizeObserver(queueXbar);
-    ro.observe($('#resTable'));
-    if (sc0) ro.observe(sc0);
+    Object.values(XBAR_TABLES).forEach(info => { const t = $(info.sel); if (t) ro.observe(t); });
+    scrollers.forEach(sc => ro.observe(sc));
     ro.observe(document.body);
   }
   queueXbar();
@@ -1459,6 +1470,116 @@ function initColResize() {
   wrap.addEventListener('scroll', onScroll, { passive: true });
   onScroll();
   window.addEventListener('resize', () => { if (!savedColW()) syncColW(); });
+}
+
+/* ================= VM inventory table: resizable columns =================
+   Same <col>-driven fixed-width scheme as the results table above, minus the
+   frozen columns and sort integration it doesn't need. Canonical column order:
+   #, Name, OS, Location, RAM, Disk, Zerto, DR GB, DR tier, Ratio, Storage, Tags,
+   Add-ons, Actions — Add-ons is the only one that's ever hidden (no add-on SKUs
+   configured), so its width still has to be tracked by a stable index even while
+   absent, the same way COLS' hidden columns are. */
+const VM_COL_COUNT = 14;
+const VM_ADDON_IDX = 12;
+const vmColVisible = i => i !== VM_ADDON_IDX || P().addons.length > 0;
+const vmVisIdx = () => Array.from({ length: VM_COL_COUNT }, (_, i) => i).filter(vmColVisible);
+const VM_COLW_MIN = i => ([40, 170, 210, 185, 90, 90, 90, 100, 170, 170, 170, 170, 150, 70][i] ?? 80);
+const vmResHeads = () => $$('#vmTable thead th:not(.spacer)');
+function savedVmColW() {
+  const w = ui().vmColW;
+  return Array.isArray(w) && w.length === VM_COL_COUNT && w.every(n => isFinite(n) && n > 0) ? w.slice() : null;
+}
+function applyVmColW(w) {
+  const t = $('#vmTable');
+  const vis = vmVisIdx();
+  $('#vmTable colgroup').innerHTML = vis.map(i => `<col style="width:${w[i]}px">`).join('') + '<col class="spacer">';
+  vmResHeads().forEach((th, i) => { th.hidden = !vmColVisible(i); });
+  t.classList.add('cols-fixed');
+  t.style.width = '100%';
+  t.style.minWidth = vis.reduce((a, i) => a + w[i], 0) + 'px';
+  queueXbar();
+}
+function measureVmColW() {
+  const t = $('#vmTable');
+  const prevW = t.style.width, prevMin = t.style.minWidth;
+  const prevCols = $('#vmTable colgroup').innerHTML;
+  const prevHidden = vmResHeads().map(th => th.hidden);
+  vmResHeads().forEach(th => { th.hidden = false; });
+  t.classList.remove('cols-fixed');
+  t.style.width = ''; t.style.minWidth = '';
+  $('#vmTable colgroup').innerHTML = Array.from({ length: VM_COL_COUNT }, () => '<col>').join('') + '<col class="spacer">';
+  const w = vmResHeads().map((th, i) => Math.min(COLW_MAX, Math.max(VM_COLW_MIN(i), Math.ceil(th.getBoundingClientRect().width) + 2)));
+  $('#vmTable colgroup').innerHTML = prevCols;
+  vmResHeads().forEach((th, i) => { th.hidden = prevHidden[i]; });
+  t.style.width = prevW; t.style.minWidth = prevMin;
+  return w;
+}
+function syncVmColW() {
+  const t = $('#vmTable');
+  if (t.hidden || !t.offsetParent) return; // hidden tab measures as 0 — redone on activation
+  let w = savedVmColW();
+  if (!w) { w = measureVmColW(); ui().vmColW = w; }
+  applyVmColW(w);
+}
+function resetVmColW(quiet) {
+  ui().vmColW = null;
+  const t = $('#vmTable');
+  if (t.hidden || !t.offsetParent) return;
+  const w = measureVmColW(); ui().vmColW = w; applyVmColW(w); save(true);
+  if (!quiet) toast('Column widths auto-fitted to content.');
+}
+function autoFitVmCol(i) {
+  const cur = savedVmColW() || measureVmColW();
+  const nat = measureVmColW();
+  cur[i] = nat[i];
+  applyVmColW(cur); ui().vmColW = cur; save(true);
+}
+function initVmColResize() {
+  vmResHeads().forEach((th, i) => {
+    const h = document.createElement('span');
+    h.className = 'col-resizer';
+    h.dataset.i = String(i);
+    h.setAttribute('role', 'separator');
+    h.setAttribute('aria-orientation', 'vertical');
+    h.title = 'Drag to resize · double-click to auto-fit';
+    th.appendChild(h);
+  });
+  let drag = null;
+  const head = $('#vmTable thead');
+  head.addEventListener('pointerdown', e => {
+    const h = e.target.closest('.col-resizer'); if (!h) return;
+    e.preventDefault(); e.stopPropagation();
+    const i = Number(h.dataset.i);
+    const arr = savedVmColW() || measureVmColW();
+    drag = { i, x: e.clientX, w: arr[i], arr };
+    $('#vmTable').classList.add('resizing');
+    document.body.classList.add('col-resizing');
+    try { h.setPointerCapture(e.pointerId); } catch (err) { /* not fatal */ }
+  });
+  const move = e => {
+    if (!drag) return;
+    const w = Math.min(COLW_MAX, Math.max(VM_COLW_MIN(drag.i), Math.round(drag.w + (e.clientX - drag.x))));
+    drag.arr[drag.i] = w;
+    applyVmColW(drag.arr);
+  };
+  const end = () => {
+    if (!drag) return;
+    ui().vmColW = drag.arr.slice();
+    drag = null;
+    $('#vmTable').classList.remove('resizing');
+    document.body.classList.remove('col-resizing');
+    save(true);
+  };
+  window.addEventListener('pointermove', move);
+  window.addEventListener('pointerup', end);
+  window.addEventListener('pointercancel', end);
+  head.addEventListener('dblclick', e => {
+    const h = e.target.closest('.col-resizer'); if (!h) return;
+    e.preventDefault(); e.stopPropagation();
+    autoFitVmCol(Number(h.dataset.i));
+  });
+  head.addEventListener('click', e => { if (e.target.closest('.col-resizer')) e.stopPropagation(); }, true);
+  window.addEventListener('resize', () => { if (!savedVmColW()) syncVmColW(); });
 }
 
 /* ================= CSV helpers ================= */
@@ -2564,6 +2685,7 @@ function initEvents() {
   $('#btnTagApply').addEventListener('click', applyTagAction);
 
   $('#btnResetCols').addEventListener('click', () => resetColW(false));
+  $('#btnResetVmCols').addEventListener('click', () => resetVmColW(false));
   /* export always asks for scope so the user never guesses what a file contains */
   $('#btnExportCsv').addEventListener('click', openExportModal);
   $$('#exportModal [data-close-export]').forEach(b => b.addEventListener('click', () => { $('#exportModal').hidden = true; }));
@@ -2752,6 +2874,7 @@ function initEvents() {
 document.documentElement.dataset.theme = 'dark'; // dark-first: data-center aesthetic
 initEvents();
 initColResize();
+initVmColResize();
 renderAll();
 initXbar();
 $('#savedStamp').textContent = 'loaded ' + new Date().toLocaleTimeString();
