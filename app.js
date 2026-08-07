@@ -1091,6 +1091,12 @@ function renderChrome() {
   renderClients();
   $('#vmCountPill').textContent = VMS().length;
   syncLocationDatalist();
+  /* Inventory's selection bar and bulk-apply labels need to reflect a just-pruned
+     selection immediately, even when the active tab is 'inventory' and its origin
+     matches — that combo deliberately skips a full renderVms() (to not blow away
+     in-progress typing), but none of this has typing to protect and must never
+     show a stale count. */
+  if ($('#vmSelBar')) refreshBulkBarLabels();
 }
 /* Called after any state mutation. `origin` is the tab the edit came from — it
    already reflects the change in its own DOM, so it is not re-rendered unless
