@@ -404,6 +404,7 @@ function afterPricingChange(structural) {
 function renderVms() {
   reconcileVmTiers();
   renderImportSummary();
+  renderUndoBar();
   const p = P(), vms = VMS();
   $('#vmCountPill').textContent = vms.length;
   renderClients();
@@ -1894,6 +1895,33 @@ function refreshPreview() {
     : (ent.length ? `Import ${ent.length} VM${ent.length === 1 ? '' : 's'}` : 'Import VMs');
 }
 
+/* ---------------- undo: single-level safety net for destructive VM edits ----------------
+   Covers CSV import/merge and the "apply to all VMs" bulk actions (ratio, storage,
+   location, Zerto DR, Clear all). Kept in memory only, not persisted — a reload loses
+   it, which is an acceptable trade for staying simple. Scoped to the client it was
+   taken on; checked at render time (not at every place state.activeId changes) so any
+   future path that switches clients is automatically covered too. Single-level: taking
+   a new snapshot silently replaces whatever was pending before. */
+let undoState = null; // { clientId, vms, label }
+function snapshotForUndo(label) {
+  undoState = { clientId: state.activeId, vms: JSON.parse(JSON.stringify(VMS())), label };
+}
+function performUndo() {
+  if (!undoState || undoState.clientId !== state.activeId) return;
+  active().vms = undoState.vms;
+  const label = undoState.label;
+  undoState = null;
+  renderVms(); commit('inventory');
+  toast(`Undone: ${label}.`);
+}
+function renderUndoBar() {
+  const box = $('#undoBar');
+  if (!box) return;
+  const valid = !!(undoState && undoState.clientId === state.activeId);
+  box.hidden = !valid;
+  if (valid) $('#undoLabel').textContent = undoState.label;
+}
+
 /* ---------------- import result summary panel (inventory tab) ---------------- */
 let importSummary = null;
 function renderImportSummary() {
@@ -2277,14 +2305,24 @@ function initEvents() {
   $('#btnClearVms').addEventListener('click', () => {
     if (!VMS().length) return;
     if (!confirm(`Delete all ${VMS().length} VMs from “${active().name}”? Pricing configuration is kept.`)) return;
+    snapshotForUndo(`cleared ${VMS().length} VM${VMS().length === 1 ? '' : 's'}`);
     active().vms = []; renderVms(); commit('inventory');
   });
-  $('#bulkRatio').addEventListener('change', e => { if (!e.target.value) return; VMS().forEach(v => v.ratioId = e.target.value); e.target.value = ''; renderVms(); commit('inventory'); toast('Ratio tier applied to all VMs.'); });
-  $('#bulkStorage').addEventListener('change', e => { if (!e.target.value) return; VMS().forEach(v => v.storageId = e.target.value); e.target.value = ''; renderVms(); commit('inventory'); toast('Storage tier applied to all VMs.'); });
+  $('#bulkRatio').addEventListener('change', e => {
+    if (!e.target.value) return;
+    snapshotForUndo('ratio tier applied to all VMs');
+    VMS().forEach(v => v.ratioId = e.target.value); e.target.value = ''; renderVms(); commit('inventory'); toast('Ratio tier applied to all VMs.');
+  });
+  $('#bulkStorage').addEventListener('change', e => {
+    if (!e.target.value) return;
+    snapshotForUndo('storage tier applied to all VMs');
+    VMS().forEach(v => v.storageId = e.target.value); e.target.value = ''; renderVms(); commit('inventory'); toast('Storage tier applied to all VMs.');
+  });
   $('#btnBulkLocation').addEventListener('click', () => {
     const val = String($('#bulkLocation').value || '').trim();
     if (!VMS().length) return;
     if (!confirm(val ? `Set location “${val}” on all ${VMS().length} VMs?` : `Clear the location on all ${VMS().length} VMs (they become “${UNASSIGNED}”)?`)) return;
+    snapshotForUndo(val ? `location set to “${val}” on all VMs` : 'location cleared on all VMs');
     VMS().forEach(v => v.location = val);
     $('#bulkLocation').value = '';
     renderVms(); commit('inventory');
@@ -2296,6 +2334,7 @@ function initEvents() {
     const on = v === 'on';
     if (!confirm(on ? `Enable Zerto DR on all ${VMS().length} VMs? Enter each VM’s DR storage GB afterwards.`
       : `Disable Zerto DR on all ${VMS().length} VMs? Their DR storage GB values will be cleared.`)) return;
+    snapshotForUndo(on ? 'Zerto DR enabled on all VMs' : 'Zerto DR disabled on all VMs');
     VMS().forEach(x => { x.dr = on; if (!on) x.drGb = 0; });
     renderVms(); commit('inventory');
     toast(on ? 'Zerto DR enabled on all VMs.' : 'Zerto DR disabled on all VMs.');
@@ -2510,6 +2549,7 @@ function initEvents() {
       const action = unmatchedAction();
       const plan = planMerge(entries, action, effectiveMatchMode, stripIdEnabled());
       if (!plan.updatedVms && !plan.added) return toast('Nothing to merge with the current mapping.', true);
+      snapshotForUndo(`CSV merge (${plan.updatedVms} updated, ${plan.added} added)`);
       // update matched VMs in place — only the mapped fields are written
       const tagAdd = tagMergeMode() === 'add';
       plan.updates.forEach(u => u.targets.forEach(v => {
@@ -2533,6 +2573,7 @@ function initEvents() {
       return;
     }
     if (!vms.length) return;
+    snapshotForUndo(mode === 'replace' ? `inventory replaced from CSV (${vms.length} VMs)` : `CSV appended (${vms.length} VMs)`);
     if (mode === 'replace') active().vms = vms; else active().vms = VMS().concat(vms);
     importSummary = {
       title: mode === 'replace' ? 'Inventory replaced from CSV' : 'CSV appended to inventory',
@@ -2545,6 +2586,10 @@ function initEvents() {
   });
   $('#impSummary').addEventListener('click', e => {
     if (e.target.id === 'impDismiss') { importSummary = null; renderImportSummary(); }
+  });
+  $('#undoBar').addEventListener('click', e => {
+    if (e.target.id === 'btnUndo') performUndo();
+    else if (e.target.id === 'undoDismiss') { undoState = null; renderUndoBar(); }
   });
 
   // clients
