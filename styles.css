@@ -222,8 +222,8 @@ tbody tr:hover{background:var(--surface-2)}
 .vm-table td.dr-cell{text-align:center}
 .vm-table td.dr-cell .switch{margin:0 auto}
 .vm-table .in[data-f="drGb"]{min-width:5rem;max-width:7rem}
-#drTable td:nth-child(2) .in{min-width:18rem}
-#drTable .rate-echo{margin-top:.1rem}
+#drStorageTable td:nth-child(2) .in, #drFeeTable td:nth-child(2) .in{min-width:18rem}
+#drStorageTable .rate-echo, #drFeeTable .rate-echo{margin-top:.1rem}
 .os-field{display:flex;align-items:center;gap:.35rem}
 .res-table td{font-family:var(--font-mono);font-variant-numeric:tabular-nums;white-space:nowrap}
 .res-table td.txt{font-family:var(--font-sans)}

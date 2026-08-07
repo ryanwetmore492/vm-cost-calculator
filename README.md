@@ -11,10 +11,10 @@ A reusable, pure client-side web app for calculating monthly cost per VM in a VM
   - Storage tiers priced **per TB or per GB** (SKU 3815 High Performance Flash, 3819 Standard Flash)
   - VMware licensing per GB RAM (SKU 2729) with apply-to-all toggle
   - Windows Server SPLA per VM (SKU 2589), auto-applied when the OS contains "Windows"
-  - **Disaster recovery (Zerto)** — DR storage priced per GB of replicated footprint plus a flat Zerto replication fee per protected VM (both with editable SKU codes)
+  - **Disaster recovery (Zerto)** — an open-ended table of DR storage tiers, each priced per GB of replicated footprint (its own SKU, name and rate — add/remove tiers and set a default, same as storage tiers), plus a single flat Zerto replication fee per protected VM shared across all tiers (also editable SKU/name/rate). Each protected VM picks its own DR storage tier independently of its primary storage tier — useful when a client replicates some VMs to standard DR storage and others to a higher-performance tier.
   - Custom add-ons priced per VM, per GB RAM, or per TB disk
   - Configurable GB→TB divisor (1024 or 1000)
-- **VM inventory** — manual entry or CSV import with a column-mapping step (auto-detects RVTools / Cloud Director headers, MB/GB/TB units, location columns, Zerto DR flag and DR storage columns), per-VM ratio tier, storage tier, data center location, **Zerto DR toggle with a manually entered DR storage (GB) value**, and add-ons
+- **VM inventory** — manual entry or CSV import with a column-mapping step (auto-detects RVTools / Cloud Director headers, MB/GB/TB units, location columns, Zerto DR flag, DR storage and DR storage tier columns), per-VM ratio tier, storage tier, data center location, **Zerto DR toggle with a manually entered DR storage (GB) value and its own DR storage tier picker**, and add-ons
 - **CSV import modes** — every import ends in a mapping modal where you choose what happens to the existing inventory:
   - **Replace inventory** — discard the current VM list and use the file
   - **Append to inventory** — add the file's rows as new VMs
@@ -26,8 +26,8 @@ A reusable, pure client-side web app for calculating monthly cost per VM in a VM
 
     **DR storage GB with no protected/unprotected column mapped** — some sources (Zerto Analytics' own VM report, for example) have no explicit yes/no flag column at all, since every row in the export is inherently a protected VM. In that case a **positive** DR storage value is treated as authoritative proof of protection and turns DR on for the matched VM; a **zero or blank** value only updates the stored footprint number and never turns DR off on its own, since it can't be told apart from "no data for this VM in this file."
 
-    Typical use: a client inventory already priced without DR, then a CSV with just `Name,Zerto,DR_Storage_GB` merged in — DR costs appear for the matched VMs and nothing else changes. Or: a Zerto Analytics VM report merged in with only its `VM Name` and `Used Storage (MB)` columns mapped — DR turns on and the footprint is set (converted from MB) for every VM Zerto reports as protected, matched by name even where Cloud Director and vCenter disagree on it.
-- **Undo last change** — CSV import (replace, append or merge) and the Inventory tab's "apply to all VMs" bulk actions (ratio tier, storage tier, location, Zerto DR, Clear all) each leave a single-level undo behind: a banner naming what just happened appears above the inventory table with an **Undo** button and a dismiss. Taking another one of these actions replaces whatever was pending — it's one step back, not a history. The snapshot lives in memory only (a page reload loses it) and is scoped to the client it was taken on, so switching profiles hides it until you switch back.
+    Typical use: a client inventory already priced without DR, then a CSV with just `Name,Zerto,DR_Storage_GB` merged in — DR costs appear for the matched VMs and nothing else changes. Or: a Zerto Analytics VM report merged in with only its `VM Name` and `Used Storage (MB)` columns mapped — DR turns on and the footprint is set (converted from MB) for every VM Zerto reports as protected, matched by name even where Cloud Director and vCenter disagree on it. A `DR storage tier` column maps the same way as ratio/storage tier columns — matched against the configured DR storage tiers by name or SKU (exact, then fuzzy), with an unrecognised value falling back to a configurable fallback tier (new rows) or left unchanged (merge updates).
+- **Undo last change** — CSV import (replace, append or merge) and the Inventory tab's "apply to all VMs" bulk actions (ratio tier, storage tier, DR storage tier, location, Zerto DR, Clear all) each leave a single-level undo behind: a banner naming what just happened appears above the inventory table with an **Undo** button and a dismiss. Taking another one of these actions replaces whatever was pending — it's one step back, not a history. The snapshot lives in memory only (a page reload loses it) and is scoped to the client it was taken on, so switching profiles hides it until you switch back.
 - **Tags in CSV** — a `Tags` column is auto-detected on import and always written on export; multiple values live in one cell (see [Tags](#tags))
 - **VM tags** — zero or more reusable free-form labels per VM (chip editor in the inventory, bulk tagging in the Cost breakdown, CSV round-trip). See [Tags](#tags).
 - **Cost breakdown** — per-VM table (including a DR $ column) with **prioritized multi-column sorting**, an **advanced filter builder**, **column visibility presets**, a **sticky horizontal scrollbar pinned to the bottom of the viewport**, a Tags column, row selection for bulk tagging, drag-resizable columns, frozen checkbox / # / server-name columns, KPI summary cards, SKU roll-up, cost-by-location roll-up with location filter, and a scoped CSV export. See [Cost breakdown workflow](#cost-breakdown-workflow).
@@ -218,12 +218,16 @@ monthly_cost(vm) =
   + storage_qty × storage_tier_rate         (qty = Disk_GB or Disk_GB ÷ divisor, per tier unit)
   + SPLA_flat_fee                           (if OS contains "windows")
   + selected add-ons                        (per VM / per GB RAM / per TB disk)
-  + DR_storage_GB × dr_storage_rate         (if Zerto DR enabled for this VM, else 0)
-  + zerto_replication_fee                   (if Zerto DR enabled for this VM, else 0)
+  + DR_storage_GB × dr_storage_tier_rate    (rate from this VM's own DR storage tier, if Zerto DR enabled, else 0)
+  + zerto_replication_fee                   (flat, same rate for every protected VM regardless of DR storage tier)
 ```
 
 Zerto DR charges apply only to VMs flagged as protected. `DR_storage_GB` is entered (or imported) per VM
-and is never derived from provisioned disk. Example: 500 DR GB at $0.15/GB + a $25.00 replication fee = **$100.00 / mo** of DR cost.
+and is never derived from provisioned disk. Each protected VM is billed at its own DR storage tier's rate —
+tiers are configured in Pricing config the same way as primary storage tiers (add, remove, set a default),
+but the flat Zerto replication fee is a single global rate, not tier-specific. Example: a VM on a 500 DR GB
+footprint assigned to a $0.15/GB tier plus the $25.00 replication fee = **$100.00 / mo** of DR cost; another
+VM on the same footprint assigned to a $0.25/GB tier instead = **$150.00 / mo**.
 
 ## Development
 

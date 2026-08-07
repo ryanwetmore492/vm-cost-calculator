@@ -48,7 +48,9 @@ function defaultPricing() {
       { id: uid(), sku: '3815', name: 'Enterprise Cloud Storage — High Performance Flash', price: 359.00, unit: 'TB', isDefault: false }
     ],
     dr: {
-      storage: { sku: '', name: 'DR Storage — Zerto Replication', price: 0.15 },
+      storageTiers: [
+        { id: uid(), sku: '', name: 'DR Storage — Zerto Replication', price: 0.15, isDefault: true }
+      ],
       fee: { sku: '', name: 'Zerto Replication Fee', price: 25.00 }
     },
     vmwareLic: { sku: '2729', name: 'VMware Licensing', price: 10.00, enabled: true },
@@ -63,7 +65,8 @@ function newClient(name, pricing) {
 function blankVm(pricing) {
   const dr = (pricing.ratios.find(r => r.isDefault) || pricing.ratios[0] || {}).id || '';
   const ds = (pricing.storage.find(s => s.isDefault) || pricing.storage[0] || {}).id || '';
-  return { id: uid(), name: '', os: 'Linux', location: '', ram: 0, disk: 0, dr: false, drGb: 0, ratioId: dr, storageId: ds, tags: [], addons: pricing.addons.filter(a => a.defaultOn).map(a => a.id) };
+  const dds = (pricing.dr.storageTiers.find(s => s.isDefault) || pricing.dr.storageTiers[0] || {}).id || '';
+  return { id: uid(), name: '', os: 'Linux', location: '', ram: 0, disk: 0, dr: false, drGb: 0, ratioId: dr, storageId: ds, drStorageId: dds, tags: [], addons: pricing.addons.filter(a => a.defaultOn).map(a => a.id) };
 }
 
 /* ---------------- storage unit helpers ----------------
@@ -81,9 +84,16 @@ function normalizePricing(p) {
   // backward compat: profiles saved before Zerto DR existed have no `dr` block
   const d = defaultPricing().dr;
   p.dr = p.dr && typeof p.dr === 'object' ? p.dr : {};
-  p.dr.storage = Object.assign({}, d.storage, p.dr.storage || {});
+  // migrate the pre-multi-tier single `dr.storage` rate object into a one-entry `dr.storageTiers` array
+  if (!Array.isArray(p.dr.storageTiers)) {
+    const legacy = p.dr.storage && typeof p.dr.storage === 'object' ? p.dr.storage : {};
+    p.dr.storageTiers = [Object.assign({}, d.storageTiers[0], legacy, { id: uid(), isDefault: true })];
+  }
+  delete p.dr.storage;
+  if (!p.dr.storageTiers.length) p.dr.storageTiers.push(Object.assign({}, d.storageTiers[0], { id: uid() }));
+  p.dr.storageTiers.forEach(s => { s.price = Number(s.price) || 0; s.sku = s.sku || ''; s.name = s.name || 'DR storage tier'; });
+  if (!p.dr.storageTiers.some(s => s.isDefault)) p.dr.storageTiers[0].isDefault = true;
   p.dr.fee = Object.assign({}, d.fee, p.dr.fee || {});
-  p.dr.storage.price = Number(p.dr.storage.price) || 0;
   p.dr.fee.price = Number(p.dr.fee.price) || 0;
   return p;
 }
@@ -97,12 +107,15 @@ function normalizeVmDr(v) {
   v.drGb = Number(v.drGb) || 0;
   return v;
 }
-const drRate = p => Number((p || P()).dr.storage.price) || 0;
+const defaultDrStorageTier = p => { const q = p || P(); return q.dr.storageTiers.find(s => s.isDefault) || q.dr.storageTiers[0] || null; };
+const drStorageTierFor = (vm, p) => { const q = p || P(); return q.dr.storageTiers.find(s => s.id === vm.drStorageId) || defaultDrStorageTier(q); };
 const drFeeRate = p => Number((p || P()).dr.fee.price) || 0;
 const drRateNum = n => (Number(n) || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 4 });
 function drSummary(p) {
   const q = p || P();
-  return `$${drRateNum(drRate(q))}/GB DR storage + ${usd(drFeeRate(q))}/protected VM`;
+  const tiers = q.dr.storageTiers || [];
+  const parts = tiers.map(t => `$${drRateNum(t.price)}/GB${tiers.length > 1 ? ' (' + shortTier(t.name) + ')' : ''}`).join(', ');
+  return `${parts || '$0.00/GB'} DR storage + ${usd(drFeeRate(q))}/protected VM`;
 }
 /* human summary of how storage is billed, used in assumptions text */
 function storageUnitSummary(p) {
@@ -249,7 +262,8 @@ function costVm(vm) {
   // Zerto DR: protected VMs only. Unprotected VMs contribute $0 on both lines.
   const drOn = vm.dr === true;
   const drGb = drOn ? (Number(vm.drGb) || 0) : 0;
-  const drStorage = round(drOn ? drGb * drRate(p) : 0);
+  const drTier = drStorageTierFor(vm, p);
+  const drStorage = round(drOn ? drGb * (drTier ? Number(drTier.price) || 0 : 0) : 0);
   const drFee = round(drOn ? drFeeRate(p) : 0);
   const dr = r2(drStorage + drFee);
   let addons = 0; const addonDetail = [];
@@ -263,9 +277,10 @@ function costVm(vm) {
   const total = r2(compute + vmware + storage + spla + addons + dr);
   return {
     vm, ram, disk, tb, ratio, storageTier: st, location: locOf(vm), tags: tagsOf(vm),
-    storageUnit, storageQty, drOn, drGb, drStorage, drFee, dr,
+    storageUnit, storageQty, drOn, drGb, drStorageTier: drTier, drStorage, drFee, dr,
     ratioLabel: ratio ? (ratio.label || ratio.name) : '— none —',
     storageLabel: st ? st.name : '— none —',
+    drStorageLabel: drTier ? drTier.name : '— none —',
     compute, vmware, storage, spla, addons, addonDetail, total, windows: isWin(vm.os)
   };
 }
@@ -319,12 +334,20 @@ function renderPricing() {
   $('#addonEmpty').hidden = p.addons.length > 0;
   $('#addonTable').hidden = p.addons.length === 0;
 
-  // Zerto DR
-  $('#drStoSku').value = p.dr.storage.sku || ''; $('#drStoName').value = p.dr.storage.name || '';
-  $('#drStoPrice').value = p.dr.storage.price;
+  // Zerto DR storage tiers
+  $('#drStorageTable tbody').innerHTML = p.dr.storageTiers.map(s => `
+    <tr data-kind="drStorage" data-id="${s.id}">
+      <td><input class="in mono sku" data-f="sku" value="${esc(s.sku)}" aria-label="DR storage SKU"></td>
+      <td><input class="in" data-f="name" value="${esc(s.name)}" aria-label="DR storage tier name"></td>
+      <td class="num"><div class="money"><span>$</span><input class="in num mono" type="number" step="0.001" min="0" data-f="price" value="${s.price}" placeholder="0.15" aria-label="DR storage price per GB"><span class="suffix">/ GB</span></div>
+        <div class="rate-echo mono">$${drRateNum(s.price)}/GB</div></td>
+      <td class="w-act"><input type="radio" name="defDrStorage" data-f="isDefault" ${s.isDefault ? 'checked' : ''} aria-label="Default DR storage tier" style="accent-color:var(--primary)"></td>
+      <td class="w-act"><button class="btn row-x" data-del="drStorage" title="Remove tier">✕</button></td>
+    </tr>`).join('');
+
+  // Zerto replication fee (flat, global — not tier-specific)
   $('#drFeeSku').value = p.dr.fee.sku || ''; $('#drFeeName').value = p.dr.fee.name || '';
   $('#drFeePrice').value = p.dr.fee.price;
-  $('#drStoEcho').textContent = '$' + drRateNum(p.dr.storage.price) + '/GB';
   $('#drFeeEcho').textContent = usd(p.dr.fee.price) + '/VM';
   $('#drEcho').textContent = drSummary(p);
 
@@ -342,7 +365,7 @@ function bindCfg(tableSel) {
     const tr = e.target.closest('tr[data-id]'); if (!tr) return;
     const f = e.target.dataset.f; if (!f) return;
     if (f === 'unit') return; // selects are handled in the change listener below
-    const list = { ratio: P().ratios, storage: P().storage, addon: P().addons }[tr.dataset.kind];
+    const list = { ratio: P().ratios, storage: P().storage, addon: P().addons, drStorage: P().dr.storageTiers }[tr.dataset.kind];
     const item = list.find(x => x.id === tr.dataset.id); if (!item) return;
     if (f === 'price') item.price = clampNonNeg(e.target);
     else if (f === 'isDefault') { list.forEach(x => x.isDefault = false); item.isDefault = true; }
@@ -351,13 +374,16 @@ function bindCfg(tableSel) {
     if (tr.dataset.kind === 'storage' && f === 'price') {
       const echo = tr.querySelector('.rate-echo'); // live rate echo without re-rendering (keeps focus)
       if (echo) echo.textContent = rateStr(item);
+    } else if (tr.dataset.kind === 'drStorage' && f === 'price') {
+      const echo = tr.querySelector('.rate-echo');
+      if (echo) echo.textContent = '$' + drRateNum(item.price) + '/GB';
     }
     afterPricingChange(f === 'label' || f === 'name');
   });
   t.addEventListener('change', e => {
     if (e.target.dataset.f !== 'unit') return;
     const tr = e.target.closest('tr[data-id]'); if (!tr) return;
-    const list = { ratio: P().ratios, storage: P().storage, addon: P().addons }[tr.dataset.kind];
+    const list = { ratio: P().ratios, storage: P().storage, addon: P().addons, drStorage: P().dr.storageTiers }[tr.dataset.kind];
     const item = (list || []).find(x => x.id === tr.dataset.id); if (!item) return;
     item.unit = e.target.value;
     if (tr.dataset.kind === 'storage') {
@@ -385,6 +411,14 @@ function bindCfg(tableSel) {
       if (!P().storage.some(x => x.isDefault)) P().storage[0].isDefault = true;
       const def = P().storage.find(x => x.isDefault).id;
       VMS().forEach(v => { if (v.storageId === id) v.storageId = def; });
+    } else if (kind === 'drStorage') {
+      if (P().dr.storageTiers.length <= 1) return toast('Keep at least one DR storage tier.', true);
+      const used = VMS().filter(v => v.drStorageId === id).length;
+      if (used && !confirm(`${used} VM(s) use this DR storage tier. Remove it? Those VMs will fall back to the default tier.`)) return;
+      P().dr.storageTiers = P().dr.storageTiers.filter(x => x.id !== id);
+      if (!P().dr.storageTiers.some(x => x.isDefault)) P().dr.storageTiers[0].isDefault = true;
+      const def = P().dr.storageTiers.find(x => x.isDefault).id;
+      VMS().forEach(v => { if (v.drStorageId === id) v.drStorageId = def; });
     } else {
       P().addons = P().addons.filter(x => x.id !== id);
       VMS().forEach(v => v.addons = (v.addons || []).filter(a => a !== id));
@@ -415,6 +449,7 @@ function renderVms() {
 
   const rOpts = v => p.ratios.map(r => `<option value="${r.id}" ${v === r.id ? 'selected' : ''}>${esc(r.label || r.name)} — $${num(r.price)}/GB</option>`).join('');
   const sOpts = v => p.storage.map(s => `<option value="${s.id}" ${v === s.id ? 'selected' : ''}>${esc(shortTier(s.name))} — ${esc(rateStr(s))}</option>`).join('');
+  const dOpts = v => p.dr.storageTiers.map(s => `<option value="${s.id}" ${v === s.id ? 'selected' : ''}>${esc(shortTier(s.name))} — $${drRateNum(s.price)}/GB</option>`).join('');
 
   $('#vmTable tbody').innerHTML = vms.map((v, i) => `
     <tr data-id="${v.id}">
@@ -428,6 +463,9 @@ function renderVms() {
       <td class="num">${v.dr
         ? `<input class="in num mono" type="number" min="0" step="1" data-f="drGb" value="${v.drGb || ''}" placeholder="0" aria-label="DR storage in GB">`
         : '<span class="dash" title="Enable Zerto DR to enter DR storage">—</span>'}</td>
+      <td>${v.dr
+        ? `<select data-f="drStorageId" aria-label="DR storage tier">${dOpts(v.drStorageId)}</select>`
+        : '<span class="dash" title="Enable Zerto DR to choose a DR storage tier">—</span>'}</td>
       <td><select data-f="ratioId" aria-label="Ratio tier">${rOpts(v.ratioId)}</select></td>
       <td><select data-f="storageId" aria-label="Storage tier">${sOpts(v.storageId)}</select></td>
       <td class="tags-td">${tagBoxHtml(v)}</td>
@@ -446,10 +484,11 @@ function renderVms() {
     dl.innerHTML = ['Microsoft Windows Server 2022', 'Microsoft Windows Server 2019', 'Microsoft Windows 11', 'Ubuntu Linux 22.04', 'Red Hat Enterprise Linux 9', 'CentOS Linux 7', 'Other'].map(o => `<option value="${o}">`).join('');
     document.body.appendChild(dl);
   }
-  const bulkR = $('#bulkRatio'), bulkS = $('#bulkStorage');
+  const bulkR = $('#bulkRatio'), bulkS = $('#bulkStorage'), bulkDS = $('#bulkDrStorage');
   bulkR.innerHTML = '<option value="">Set ratio tier for all…</option>' + p.ratios.map(r => `<option value="${r.id}">${esc(r.label || r.name)}</option>`).join('');
   $('#bulkDr').value = '';
   bulkS.innerHTML = '<option value="">Set storage tier for all…</option>' + p.storage.map(s => `<option value="${s.id}">${esc(shortTier(s.name))} — ${esc(rateStr(s))}</option>`).join('');
+  bulkDS.innerHTML = '<option value="">Set DR storage tier for all…</option>' + p.dr.storageTiers.map(s => `<option value="${s.id}">${esc(shortTier(s.name))} — $${drRateNum(s.price)}/GB</option>`).join('');
 }
 const shortTier = n => String(n).replace(/^Enterprise Cloud Storage\s*[—-]\s*/i, '');
 
@@ -843,7 +882,7 @@ function renderResults() {
     c[13] = `<td class="num${r.spla ? '' : ' zero'}">${usd(r.spla)}</td>`;
     c[14] = `<td class="num${r.addons ? '' : ' zero'}">${usd(r.addons)}</td>`;
     c[15] = `<td class="txt w-drs"><span class="st-tag${r.drOn ? ' on' : ''}">${r.drOn ? 'Protected' : 'No DR'}</span></td>`;
-    c[16] = `<td class="num${r.dr ? '' : ' zero'}"${r.drOn ? ` title="${num(r.drGb)} DR GB × $${drRateNum(drRate(P()))}/GB + ${usd(drFeeRate(P()))} fee"` : ' title="Not Zerto-protected"'}>${usd(r.dr)}</td>`;
+    c[16] = `<td class="num${r.dr ? '' : ' zero'}"${r.drOn ? ` title="${num(r.drGb)} DR GB × $${drRateNum(r.drStorageTier ? r.drStorageTier.price : 0)}/GB (${r.drStorageTier ? shortTier(r.drStorageTier.name) : '—'}) + ${usd(drFeeRate(P()))} fee"` : ' title="Not Zerto-protected"'}>${usd(r.dr)}</td>`;
     c[17] = `<td class="num total">${usd(r.total)}</td>`;
     return `<tr${selected.has(r.vm.id) ? ' class="rowsel-on"' : ''}>${vis.map(k => c[k]).join('')}<td class="spacer"></td></tr>`;
   }).join('')
@@ -961,12 +1000,16 @@ function renderRollup(rows) {
     const qty = rr.reduce((a, r) => a + (u === 'GB' ? r.disk : r.tb), 0);
     out.push([st.sku, `${st.name} (${rr.length} VM${rr.length > 1 ? 's' : ''})`, num(qty) + ' ' + u, '$' + rateNum(st) + ' /' + u, rr.reduce((a, r) => a + r.storage, 0)]);
   });
-  // Zerto DR: two rows — metered DR storage (total GB) and the flat per-protected-VM fee
+  // Zerto DR: one metered-storage row per DR storage tier actually in use, plus the flat per-protected-VM fee
   const prot = rows.filter(r => r.drOn);
   if (prot.length) {
-    const gb = prot.reduce((a, r) => a + r.drGb, 0);
-    out.push([p.dr.storage.sku, `${p.dr.storage.name} (${prot.length} protected VM${prot.length > 1 ? 's' : ''})`,
-      num(gb) + ' GB', '$' + drRateNum(drRate(p)) + ' /GB', prot.reduce((a, r) => a + r.drStorage, 0)]);
+    p.dr.storageTiers.forEach(dt => {
+      const rr = prot.filter(r => r.drStorageTier && r.drStorageTier.id === dt.id);
+      if (!rr.length) return;
+      const gb = rr.reduce((a, r) => a + r.drGb, 0);
+      out.push([dt.sku, `${dt.name} (${rr.length} protected VM${rr.length > 1 ? 's' : ''})`,
+        num(gb) + ' GB', '$' + drRateNum(dt.price) + ' /GB', rr.reduce((a, r) => a + r.drStorage, 0)]);
+    });
     out.push([p.dr.fee.sku, `${p.dr.fee.name} (${prot.length} protected VM${prot.length > 1 ? 's' : ''})`,
       prot.length + ' VMs', usd(drFeeRate(p)) + ' /VM', prot.reduce((a, r) => a + r.drFee, 0)]);
   }
@@ -1026,11 +1069,13 @@ function reconcileVmTiers() {
   const p = P();
   const dR = (p.ratios.find(r => r.isDefault) || p.ratios[0] || {}).id || '';
   const dS = (p.storage.find(s => s.isDefault) || p.storage[0] || {}).id || '';
+  const dDS = (p.dr.storageTiers.find(s => s.isDefault) || p.dr.storageTiers[0] || {}).id || '';
   const okA = new Set(p.addons.map(a => a.id));
   VMS().forEach(v => {
     normalizeVmDr(v); // DR flag/GB always well-formed, whatever the profile vintage
     if (!p.ratios.some(r => r.id === v.ratioId)) v.ratioId = dR;
     if (!p.storage.some(s => s.id === v.storageId)) v.storageId = dS;
+    if (!p.dr.storageTiers.some(s => s.id === v.drStorageId)) v.drStorageId = dDS;
     v.addons = (v.addons || []).filter(a => okA.has(a));
   });
 }
@@ -1469,11 +1514,15 @@ const FIELDS = [
        row and silently force DR off across the whole merge. */
     avoid: /\b(gb|mb|tb|gib|mib|tib)\b|size|capacity|journal|replica|protected site|recovery site/ },
   { key: 'drGb', label: 'DR storage (optional)', req: false, hints: ['dr gb', 'dr storage', 'dr storage gb', 'zerto gb', 'journal', 'journal gb', 'replica', 'replica gb', 'dr size', 'replication gb', 'dr capacity', 'used storage'] },
+  { key: 'drTier', label: 'DR storage tier (optional)', req: false, hints: ['dr storage tier', 'dr tier', 'zerto storage tier', 'zerto tier', 'dr storage policy', 'vpg storage tier'] },
   { key: 'ratio', label: 'Ratio tier (optional)', req: false, hints: ['ratio', 'ratio tier', 'processor ratio', 'tier', 'compute tier'] },
   /* the bare word "policy" is too generic — it also matches unrelated boolean/ID columns
      like "Is Compute Policy Compliant" or "VM Placement Policy ID"; "storage policy" and
-     "storage profile" already cover the real Cloud Director column names. */
-  { key: 'storage', label: 'Storage tier (optional)', req: false, hints: ['storagetier', 'storage tier', 'storage_tier', 'datastore', 'storage policy', 'storage profile'] },
+     "storage profile" already cover the real Cloud Director column names. A DR/Zerto-labeled
+     storage policy column (e.g. "Zerto DR Storage Policy") belongs to drTier above, not here —
+     the avoid regex is a backstop in case drTier's own hints don't already claim it first. */
+  { key: 'storage', label: 'Storage tier (optional)', req: false, hints: ['storagetier', 'storage tier', 'storage_tier', 'datastore', 'storage policy', 'storage profile'],
+    avoid: /\b(dr|zerto|draas)\b|disaster recovery|replication/ },
   /* One cell may hold several tags separated by ; , or | — see parseTagCell(). */
   { key: 'tags', label: 'Tags (optional)', req: false, hints: ['tags', 'tag', 'labels', 'label', 'categories', 'category', 'tag list', 'custom attributes', 'annotation'] }
 ];
@@ -1552,6 +1601,7 @@ function openMapper(file, parsed) {
   $('#mapDrUnit').value = guessUnit(pending.map.drGb, 'disk');
   $('#mapRatio').innerHTML = p.ratios.map(r => `<option value="${r.id}" ${r.isDefault ? 'selected' : ''}>${esc(r.label || r.name)}</option>`).join('');
   $('#mapStorage').innerHTML = p.storage.map(s => `<option value="${s.id}" ${s.isDefault ? 'selected' : ''}>${esc(shortTier(s.name))} — ${esc(rateStr(s))}</option>`).join('');
+  $('#mapDrStorage').innerHTML = p.dr.storageTiers.map(s => `<option value="${s.id}" ${s.isDefault ? 'selected' : ''}>${esc(shortTier(s.name))} — $${drRateNum(s.price)}/GB</option>`).join('');
   syncLocationDatalist();
   $('#mapLocation').value = '';
   /* Smart default: enrichment files (name mapped, no RAM/disk columns) against an
@@ -1632,7 +1682,7 @@ function buildImport() {
   const dScale = { GB: 1, MB: 1 / 1024, TB: 1024 }[$('#mapDiskUnit').value];
   const rScale = { GB: 1, MB: 1 / 1024 }[$('#mapRamUnit').value];
   const drScale = { GB: 1, MB: 1 / 1024, TB: 1024 }[$('#mapDrUnit').value];
-  const fbR = $('#mapRatio').value, fbS = $('#mapStorage').value;
+  const fbR = $('#mapRatio').value, fbS = $('#mapStorage').value, fbDr = $('#mapDrStorage').value;
   const fbLoc = String($('#mapLocation').value || '').trim();
   /* "name+location" only makes sense once a location column is actually mapped —
      otherwise every row's location key is blank and it degrades to name-only anyway. */
@@ -1658,8 +1708,10 @@ function buildImport() {
     if (m.drFlag && drOn && m.drGb && !(drGb > 0)) warns.push(`Row ${i + 2}: Zerto DR flagged on but no DR storage GB — only the flat fee will apply.`);
     const rt = m.ratio ? matchTier(p.ratios, row[m.ratio], ['label', 'name', 'sku']) : null;
     const st = m.storage ? matchTier(p.storage, row[m.storage], ['name', 'sku']) : null;
+    const dt = m.drTier ? matchTier(p.dr.storageTiers, row[m.drTier], ['name', 'sku']) : null;
     if (m.ratio && !rt && String(row[m.ratio] || '').trim()) warns.push(`Row ${i + 2}: ratio “${row[m.ratio]}” not recognised — ${mode === 'merge' ? 'tier left unchanged' : 'using fallback tier'}.`);
     if (m.storage && !st && String(row[m.storage] || '').trim()) warns.push(`Row ${i + 2}: storage tier “${row[m.storage]}” not recognised — ${mode === 'merge' ? 'tier left unchanged' : 'using fallback tier'}.`);
+    if (m.drTier && !dt && String(row[m.drTier] || '').trim()) warns.push(`Row ${i + 2}: DR storage tier “${row[m.drTier]}” not recognised — ${mode === 'merge' ? 'tier left unchanged' : 'using fallback tier'}.`);
 
     const full = {
       id: uid(),
@@ -1672,6 +1724,7 @@ function buildImport() {
       drGb: drOn ? drGb : 0,
       ratioId: rt ? rt.id : fbR,
       storageId: st ? st.id : fbS,
+      drStorageId: dt ? dt.id : fbDr,
       tags: m.tags ? parseTagCell(row[m.tags]) : [],
       addons: p.addons.filter(a => a.defaultOn).map(a => a.id)
     };
@@ -1692,6 +1745,7 @@ function buildImport() {
     else if (m.drGb && isFinite(drGbRaw)) { patch.drGb = drGb; if (drGb > 0) patch.dr = true; }
     if (rt) patch.ratioId = rt.id;
     if (st) patch.storageId = st.id;
+    if (dt) patch.drStorageId = dt.id;
     /* Tags: a blank cell means “no tag data for this row”, so existing tags survive.
        A populated cell replaces the VM's tag list (predictable and round-trips). */
     if (m.tags && String(row[m.tags] ?? '').trim() !== '') patch.tags = parseTagCell(row[m.tags]);
@@ -1795,6 +1849,7 @@ function fmtField(field, val, ctx) {
     case 'drGb': return ctx.dr ? num(val) : '<span class="dash">—</span>';
     case 'ratioId': return esc((P().ratios.find(r => r.id === val) || {}).label || '—');
     case 'storageId': return esc(shortTier((P().storage.find(s => s.id === val) || {}).name || '—'));
+    case 'drStorageId': return esc(shortTier((P().dr.storageTiers.find(s => s.id === val) || {}).name || '—'));
     case 'tags': return (val || []).length ? (val || []).map(t => `<span class="tag-chip ro">${esc(t)}</span>`).join('') : '<span class="dash">—</span>';
     default: return esc(String(val ?? ''));
   }
@@ -1820,7 +1875,7 @@ function refreshPreview() {
     const hit = plan && plan.updates.find(u => u.entry === e);
     return (hit && hit.targets.length === 1) ? hit.targets[0] : null;
   };
-  const head = (merge ? ['Action'] : []).concat(['Name', 'OS', 'Location', 'RAM GB', 'Disk GB', 'Zerto DR', 'DR GB', 'Ratio', 'Storage tier', 'Tags']);
+  const head = (merge ? ['Action'] : []).concat(['Name', 'OS', 'Location', 'RAM GB', 'Disk GB', 'Zerto DR', 'DR GB', 'DR tier', 'Ratio', 'Storage tier', 'Tags']);
   const action = e => {
     if (!e.name) return '<span class="tag skip">skip</span>';
     const hit = (plan.updates.find(u => u.entry.matchKey === e.matchKey) || {});
@@ -1856,6 +1911,7 @@ function refreshPreview() {
       <td class="num mono">${cell('disk', v.disk)}</td>
       <td class="${v.dr ? 'mono' : 'unassigned'}">${cell('dr', v.dr)}</td>
       <td class="num mono">${cell('drGb', v.drGb)}</td>
+      <td>${cell('drStorageId', v.drStorageId)}</td>
       <td>${cell('ratioId', v.ratioId)}</td>
       <td>${cell('storageId', v.storageId)}</td>
       <td>${cell('tags', v.tags)}</td></tr>`;
@@ -1976,17 +2032,17 @@ function exportResultsCsv(scope) {
   if (!rows.length) return toast('No VMs to export.', true);
   const p = P();
   const head = ['Name', 'OS', 'Location', 'Tags', 'RAM_GB', 'Disk_GB', 'Disk_TB', 'RatioTier', 'RatioRate_perGB', 'StorageTier', 'StorageUnit', 'StorageBilledQty', 'StorageRate_perUnit',
-    'ZertoDR', 'DRStorage_GB', 'Compute_USD', 'VMwareLicensing_USD', 'Storage_USD', 'WindowsSPLA_USD', 'Addons_USD', 'DR_USD', 'TotalMonthly_USD'];
+    'ZertoDR', 'DRStorage_GB', 'DRStorageTier', 'Compute_USD', 'VMwareLicensing_USD', 'Storage_USD', 'WindowsSPLA_USD', 'Addons_USD', 'DR_USD', 'TotalMonthly_USD'];
   const lines = [head];
   rows.forEach(r => lines.push([
     r.vm.name, r.vm.os, r.location, r.tags.join(TAG_DELIM), r.ram, r.disk, r2(r.tb), r.ratioLabel, r.ratio ? r.ratio.price : 0,
     shortTier(r.storageLabel), r.storageUnit, r2(r.storageQty), r.storageTier ? r.storageTier.price : 0,
-    r.drOn ? 'yes' : 'no', r2(r.drGb),
+    r.drOn ? 'yes' : 'no', r2(r.drGb), r.drOn ? shortTier(r.drStorageLabel) : '',
     r2(r.compute), r2(r.vmware), r2(r.storage), r2(r.spla), r2(r.addons), r2(r.dr), r2(r.total)
   ]));
   const T = rows.reduce((a, r) => [a[0] + r.ram, a[1] + r.disk, a[2] + r.compute, a[3] + r.vmware, a[4] + r.storage, a[5] + r.spla, a[6] + r.addons, a[7] + r.total, a[8] + r.dr, a[9] + r.drGb, a[10] + (r.drOn ? 1 : 0)], [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
   lines.push([]);
-  lines.push(['TOTAL (' + rows.length + ' VMs)', '', '', '', T[0], T[1], r2(T[1] / p.settings.divisor), '', '', '', '', '', '', T[10] + ' protected', r2(T[9]), r2(T[2]), r2(T[3]), r2(T[4]), r2(T[5]), r2(T[6]), r2(T[8]), r2(T[7])]);
+  lines.push(['TOTAL (' + rows.length + ' VMs)', '', '', '', T[0], T[1], r2(T[1] / p.settings.divisor), '', '', '', '', '', '', T[10] + ' protected', r2(T[9]), '', r2(T[2]), r2(T[3]), r2(T[4]), r2(T[5]), r2(T[6]), r2(T[8]), r2(T[7])]);
 
   // --- location summary block ---
   const groups = locationTotals(rows);
@@ -1996,12 +2052,18 @@ function exportResultsCsv(scope) {
   groups.forEach(g => lines.push([g.location, g.vms, r2(g.ram), r2(g.disk), r2(g.tb), g.drVms, r2(g.drGb), r2(g.compute), r2(g.vmware), r2(g.storage), r2(g.spla), r2(g.addons), r2(g.dr), r2(g.total), T[7] ? r2(g.total / T[7] * 100) : 0]));
   lines.push(['All locations (' + groups.length + ')', rows.length, r2(T[0]), r2(T[1]), r2(T[1] / p.settings.divisor), T[10], r2(T[9]), r2(T[2]), r2(T[3]), r2(T[4]), r2(T[5]), r2(T[6]), r2(T[8]), r2(T[7]), 100]);
 
-  // --- Zerto DR roll-up (two SKU lines, protected VMs only) ---
+  // --- Zerto DR roll-up (one SKU line per DR storage tier in use, plus the flat fee, protected VMs only) ---
   lines.push([]);
   lines.push(['ZERTO DR ROLL-UP']);
   lines.push(['SKU', 'Charge', 'Quantity', 'Rate', 'Monthly_USD']);
-  lines.push([p.dr.storage.sku || '', p.dr.storage.name, r2(T[9]) + ' GB', '$' + drRateNum(drRate(p)) + ' per GB',
-    r2(rows.reduce((a, r) => a + r.drStorage, 0))]);
+  const drProt = rows.filter(r => r.drOn);
+  p.dr.storageTiers.forEach(dt => {
+    const rr = drProt.filter(r => r.drStorageTier && r.drStorageTier.id === dt.id);
+    if (!rr.length) return;
+    const gb = rr.reduce((a, r) => a + r.drGb, 0);
+    lines.push([dt.sku || '', dt.name, r2(gb) + ' GB', '$' + drRateNum(dt.price) + ' per GB',
+      r2(rr.reduce((a, r) => a + r.drStorage, 0))]);
+  });
   lines.push([p.dr.fee.sku || '', p.dr.fee.name, T[10] + ' protected VMs', usd(drFeeRate(p)) + ' per VM',
     r2(rows.reduce((a, r) => a + r.drFee, 0))]);
 
@@ -2185,7 +2247,7 @@ function initEvents() {
   });
 
   // pricing tables
-  ['#ratioTable', '#storageTable', '#addonTable'].forEach(bindCfg);
+  ['#ratioTable', '#storageTable', '#addonTable', '#drStorageTable'].forEach(bindCfg);
   $('#btnAddRatio').addEventListener('click', () => {
     P().ratios.push({ id: uid(), sku: '', label: '1:1', name: 'Enterprise Cloud Compute (1:1 Processor Ratio)', price: 0, isDefault: false });
     renderPricing(); commit('pricing');
@@ -2198,11 +2260,15 @@ function initEvents() {
     P().addons.push({ id: uid(), sku: 'ADDON', name: 'New add-on', unit: 'per-vm', price: 0, defaultOn: false });
     renderPricing(); commit('pricing');
   });
+  $('#btnAddDrStorage').addEventListener('click', () => {
+    P().dr.storageTiers.push({ id: uid(), sku: '', name: 'New DR storage tier', price: 0, isDefault: false });
+    renderPricing(); commit('pricing');
+  });
   $('#btnResetPricing').addEventListener('click', () => {
     if (!confirm('Reset all pricing, tiers and add-ons for this client to catalog defaults? VM inventory is kept (tiers reassigned to defaults).')) return;
     active().pricing = defaultPricing();
-    const dr = P().ratios.find(r => r.isDefault).id, ds = P().storage.find(s => s.isDefault).id;
-    VMS().forEach(v => { v.ratioId = dr; v.storageId = ds; v.addons = []; });
+    const dr = P().ratios.find(r => r.isDefault).id, ds = P().storage.find(s => s.isDefault).id, dds = P().dr.storageTiers.find(s => s.isDefault).id;
+    VMS().forEach(v => { v.ratioId = dr; v.storageId = ds; v.drStorageId = dds; v.addons = []; });
     renderAll(); save(true); toast('Pricing reset to defaults.');
   });
   // licensing fields
@@ -2212,16 +2278,9 @@ function initEvents() {
   $('#licVmPrice').addEventListener('input', e => { P().vmwareLic.price = clampNonNeg(e.target); afterPricingChange(false); });
   $('#splaPrice').addEventListener('input', e => { P().spla.price = clampNonNeg(e.target); afterPricingChange(false); });
 
-  // Zerto DR pricing
-  const drBind = [['#drStoSku', v => P().dr.storage.sku = v], ['#drStoName', v => P().dr.storage.name = v],
-    ['#drFeeSku', v => P().dr.fee.sku = v], ['#drFeeName', v => P().dr.fee.name = v]];
-  drBind.forEach(([sel, fn]) => $(sel).addEventListener('input', e => { fn(e.target.value); afterPricingChange(false); }));
-  $('#drStoPrice').addEventListener('input', e => {
-    P().dr.storage.price = clampNonNeg(e.target);
-    $('#drStoEcho').textContent = '$' + drRateNum(P().dr.storage.price) + '/GB';
-    $('#drEcho').textContent = drSummary(P());
-    afterPricingChange(false);
-  });
+  // Zerto replication fee (flat, global — the DR storage tiers table above is handled by bindCfg)
+  const drFeeBind = [['#drFeeSku', v => P().dr.fee.sku = v], ['#drFeeName', v => P().dr.fee.name = v]];
+  drFeeBind.forEach(([sel, fn]) => $(sel).addEventListener('input', e => { fn(e.target.value); afterPricingChange(false); }));
   $('#drFeePrice').addEventListener('input', e => {
     P().dr.fee.price = clampNonNeg(e.target);
     $('#drFeeEcho').textContent = usd(P().dr.fee.price) + '/VM';
@@ -2262,6 +2321,7 @@ function initEvents() {
     }
     if (e.target.dataset.f === 'ratioId') vm.ratioId = e.target.value;
     if (e.target.dataset.f === 'storageId') vm.storageId = e.target.value;
+    if (e.target.dataset.f === 'drStorageId') vm.drStorageId = e.target.value;
     if (e.target.dataset.addon) {
       const id = e.target.dataset.addon;
       vm.addons = vm.addons || [];
@@ -2317,6 +2377,11 @@ function initEvents() {
     if (!e.target.value) return;
     snapshotForUndo('storage tier applied to all VMs');
     VMS().forEach(v => v.storageId = e.target.value); e.target.value = ''; renderVms(); commit('inventory'); toast('Storage tier applied to all VMs.');
+  });
+  $('#bulkDrStorage').addEventListener('change', e => {
+    if (!e.target.value) return;
+    snapshotForUndo('DR storage tier applied to all VMs');
+    VMS().forEach(v => v.drStorageId = e.target.value); e.target.value = ''; renderVms(); commit('inventory'); toast('DR storage tier applied to all VMs.');
   });
   $('#btnBulkLocation').addEventListener('click', () => {
     const val = String($('#bulkLocation').value || '').trim();
@@ -2532,7 +2597,7 @@ function initEvents() {
     if (e.target.dataset.map === 'drGb') $('#mapDrUnit').value = guessUnit(e.target.value, 'disk');
     refreshPreview();
   });
-  ['#mapDiskUnit', '#mapRamUnit', '#mapDrUnit', '#mapRatio', '#mapStorage', '#mapLocation', '#mapMode', '#mapMatchKey', '#mapStripId', '#mapTagMode', '#mapUnmatched'].forEach(s => $(s).addEventListener('change', refreshPreview));
+  ['#mapDiskUnit', '#mapRamUnit', '#mapDrUnit', '#mapRatio', '#mapStorage', '#mapDrStorage', '#mapLocation', '#mapMode', '#mapMatchKey', '#mapStripId', '#mapTagMode', '#mapUnmatched'].forEach(s => $(s).addEventListener('change', refreshPreview));
   $('#mapLocation').addEventListener('input', refreshPreview);
   $$('#mapModal [data-close]').forEach(b => b.addEventListener('click', () => { $('#mapModal').hidden = true; pending = null; }));
   $('#mapModal').addEventListener('click', e => { if (e.target.id === 'mapModal') { $('#mapModal').hidden = true; pending = null; } });
