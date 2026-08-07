@@ -1576,6 +1576,7 @@ function importMode() { const el = $('#mapMode'); return el ? el.value : 'append
 function unmatchedAction() { const el = $('#mapUnmatched'); return el ? el.value : 'add'; }
 function matchKeyMode() { const el = $('#mapMatchKey'); return el ? el.value : 'name'; }
 function stripIdEnabled() { const el = $('#mapStripId'); return el ? el.checked : false; }
+function tagMergeMode() { const el = $('#mapTagMode'); return el ? el.value : 'replace'; }
 /* Cloud Director creates the underlying vCenter VM object with a random 4-char
    suffix (e.g. "SERVER01-a1B2") whenever the vCD-visible name needs disambiguating
    in vCenter. Tools that read vCenter directly (Zerto Analytics, RVTools by MoRef,
@@ -1767,6 +1768,8 @@ function syncModeUi(mapped) {
   if (mk) mk.hidden = sel.value !== 'merge';
   const si = $('#mapStripIdField');
   if (si) si.hidden = sel.value !== 'merge';
+  const tm = $('#mapTagModeField');
+  if (tm) tm.hidden = sel.value !== 'merge' || !mapped.tags;
   /* in merge mode only the name column is required — hide the other required markers */
   $('#mapGrid').classList.toggle('merge', sel.value === 'merge');
   return sel.value;
@@ -1826,13 +1829,20 @@ function refreshPreview() {
     const dup = plan.dupCsv.length && ent.some(o => o !== e && o.matchKey === e.matchKey && ent.indexOf(o) > ent.indexOf(e));
     return dup ? '<span class="tag skip">superseded</span>' : '<span class="tag skip">skip</span>';
   };
+  const tagAdd = merge && tagMergeMode() === 'add';
   const rows = ent.slice(0, 8).map(e => {
     const v = e.full;
     const target = merge && !isAdd(e) ? singleTarget(e) : null;
     const cell = (field, rawNew) => {
       if (merge && !isAdd(e) && !e.fields.includes(field)) return unchanged;
-      const newHtml = fmtField(field, rawNew, v);
-      if (target && e.fields.includes(field) && !fieldsEqual(field, target[field], rawNew)) {
+      /* "Add to existing tags" unions with the actual matched VM's tags rather than
+         replacing — only knowable once a single target is resolved, same as any
+         other diff below, so the preview shows what will really land on commit. */
+      const effectiveNew = (field === 'tags' && tagAdd && target)
+        ? normalizeTagList([...(target.tags || []), ...rawNew]).tags
+        : rawNew;
+      const newHtml = fmtField(field, effectiveNew, v);
+      if (target && e.fields.includes(field) && !fieldsEqual(field, target[field], effectiveNew)) {
         return `<span class="diff-old">${fmtField(field, target[field], target)}</span><span class="diff-arrow" aria-hidden="true"></span><span class="diff-new">${newHtml}</span>`;
       }
       return newHtml;
@@ -1867,6 +1877,7 @@ function refreshPreview() {
     const matchDesc = b.effectiveMatchMode === 'name+location' ? 'name and location' : 'name';
     msgs.push(`<strong>Merge mode:</strong> matches existing VMs by ${matchDesc} (case-insensitive). Only mapped fields are written — ${fields.length ? '<span class="mono">' + fields.map(esc).join(', ') + '</span>' : 'nothing yet'}. Fallback tiers and the default location apply to newly added rows only. A field that's actually changing on a single-VM match is shown as <span class="diff-old">old</span><span class="diff-arrow" aria-hidden="true"></span><span class="diff-new">new</span>.`);
     if (b.matchModeDowngraded) msgs.push(`<strong>Note:</strong> “Name + location” matching needs a mapped location column — matching by name only until one is mapped.`);
+    if (b.map.tags) msgs.push(`<strong>Tags:</strong> a populated cell ${tagMergeMode() === 'add' ? "is added to each VM's existing tags (deduplicated, still capped at 12 per VM)" : "replaces each VM's existing tag list entirely"}; a blank cell leaves tags untouched.`);
     if (plan.dupCsv.length) msgs.push(`<strong>Duplicate row${plan.dupCsv.length > 1 ? 's' : ''} in CSV:</strong> ${plan.dupCsv.slice(0, 5).map(esc).join(', ')}${plan.dupCsv.length > 5 ? ` …+${plan.dupCsv.length - 5}` : ''} — the last row for each match wins.`);
     if (plan.dupInv.length) msgs.push(`<strong>Multiple existing VMs share the same ${matchDesc}:</strong> ${plan.dupInv.slice(0, 5).map(d => esc(d.name) + ' ×' + d.n).join(', ')} — every match will be updated.`);
     if (plan.stripped.length) msgs.push(`<strong>${plan.stripped.length} row${plan.stripped.length > 1 ? 's' : ''} matched after stripping a trailing vCenter ID:</strong> ${plan.stripped.slice(0, 5).map(esc).join(', ')}${plan.stripped.length > 5 ? ` …+${plan.stripped.length - 5}` : ''} — flagged <span class="mono">· ID stripped</span> in the preview below.`);
@@ -2482,7 +2493,7 @@ function initEvents() {
     if (e.target.dataset.map === 'drGb') $('#mapDrUnit').value = guessUnit(e.target.value, 'disk');
     refreshPreview();
   });
-  ['#mapDiskUnit', '#mapRamUnit', '#mapDrUnit', '#mapRatio', '#mapStorage', '#mapLocation', '#mapMode', '#mapMatchKey', '#mapStripId', '#mapUnmatched'].forEach(s => $(s).addEventListener('change', refreshPreview));
+  ['#mapDiskUnit', '#mapRamUnit', '#mapDrUnit', '#mapRatio', '#mapStorage', '#mapLocation', '#mapMode', '#mapMatchKey', '#mapStripId', '#mapTagMode', '#mapUnmatched'].forEach(s => $(s).addEventListener('change', refreshPreview));
   $('#mapLocation').addEventListener('input', refreshPreview);
   $$('#mapModal [data-close]').forEach(b => b.addEventListener('click', () => { $('#mapModal').hidden = true; pending = null; }));
   $('#mapModal').addEventListener('click', e => { if (e.target.id === 'mapModal') { $('#mapModal').hidden = true; pending = null; } });
@@ -2500,7 +2511,13 @@ function initEvents() {
       const plan = planMerge(entries, action, effectiveMatchMode, stripIdEnabled());
       if (!plan.updatedVms && !plan.added) return toast('Nothing to merge with the current mapping.', true);
       // update matched VMs in place — only the mapped fields are written
-      plan.updates.forEach(u => u.targets.forEach(v => Object.assign(v, u.entry.patch)));
+      const tagAdd = tagMergeMode() === 'add';
+      plan.updates.forEach(u => u.targets.forEach(v => {
+        const patch = u.entry.patch;
+        // "Add to existing tags" unions per target VM — each match may already carry a different tag list.
+        const tags = (tagAdd && patch.tags) ? normalizeTagList([...(v.tags || []), ...patch.tags]).tags : patch.tags;
+        Object.assign(v, patch, tags !== undefined ? { tags } : {});
+      }));
       if (plan.adds.length) active().vms = VMS().concat(plan.adds.map(e => e.full));
       const fields = Array.from(new Set([].concat(...plan.updates.map(u => u.entry.fields))));
       importSummary = {

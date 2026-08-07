@@ -66,9 +66,13 @@ stored with the client profile, so every client has its own tag vocabulary.
 - Imports accept `;`, `,` or `|` inside the cell: `"prod, web, tier-1"` and `"prod|web|tier-1"` parse identically.
 - Header auto-detection matches `Tags`, `Tag`, `Labels`, `Categories`-style headers; otherwise map the column
   manually in the import dialog.
-- In **merge** mode a *populated* Tags cell **replaces** that VM's tag list, while a *blank* cell leaves the
-  existing tags untouched (the preview shows `unchanged`). Set **Rows with no matching VM → Skip them** when
-  re-importing an exported file so summary rows are ignored.
+- In **merge** mode, once a Tags column is mapped a **Tags** option appears choosing what a *populated* cell does
+  to that VM's existing list — **Replace existing tags** (default) overwrites it entirely, **Add to existing
+  tags** unions the cell's tags in instead, using the same normalization as everywhere else (case-insensitive
+  dedup, first spelling wins, capped at 12 per VM — extras from the union are dropped silently, same as any other
+  tag entry point). A *blank* cell always leaves existing tags untouched either way (the preview shows
+  `unchanged`). Set **Rows with no matching VM → Skip them** when re-importing an exported file so summary rows
+  are ignored.
 - Tags round-trip: export → import (merge, unmatched = skip) reproduces the same tags.
 
 See `sample-vm-inventory.csv` for a working example.
